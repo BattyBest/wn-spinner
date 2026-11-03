@@ -15,7 +15,7 @@ def test_robots_command_prints_the_delay_in_force(tmp_path, monkeypatch):
         result = runner.invoke(app, ["robots", "ncode.syosetu.com"])
     assert result.exit_code == 0, result.output
     assert "their delay:    1 s" in result.output
-    assert "delay in force: 2.5 s" in result.output
+    assert "delay in force: 1 s" in result.output
     assert "/: allowed" in result.output
 
 
@@ -49,3 +49,51 @@ def test_disallowed_fetch_exits_with_an_error(tmp_path, monkeypatch):
         respx.get("https://x.test/robots.txt").respond(200, text="User-agent: *\nDisallow: /")
         result = runner.invoke(app, ["fetch", "https://x.test/a"])
     assert result.exit_code == 1
+
+
+def _fake_syosetu(router):
+    from pathlib import Path
+
+    fx = Path(__file__).parent / "fixtures" / "syosetu"
+    router.get("https://api.syosetu.com/robots.txt").respond(404)
+    router.get("https://ncode.syosetu.com/robots.txt").respond(404)
+    router.get(url__startswith="https://api.syosetu.com/rank/rankget/").respond(
+        200, text=(fx / "ranking_daily.json").read_text(encoding="utf-8")
+    )
+    router.get(url__startswith="https://api.syosetu.com/novelapi/api/").respond(
+        200, text=(fx / "novels.json").read_text(encoding="utf-8")
+    )
+    router.get(url__regex=r"https://ncode\.syosetu\.com/n\d+\w+/.*").respond(
+        200, text=(fx / "chapter_new.html").read_text(encoding="utf-8")
+    )
+
+
+def test_syosetu_run_collects_then_a_second_run_has_nothing_to_do(tmp_path, monkeypatch):
+    monkeypatch.setenv("WN_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("wn.collector.http.DEFAULT_DELAY", 0.0)
+    monkeypatch.setattr("wn.syosetu.pipeline.DEFAULT_DELAY", 0.0)
+    with respx.mock(assert_all_called=False) as router:
+        _fake_syosetu(router)
+        first = runner.invoke(app, ["syosetu", "run", "--limit", "10", "--target", "50", "--yes"])
+        assert first.exit_code == 0, first.output
+        assert "novels to read:  4" in first.output and "4 scored" in first.output
+        again = runner.invoke(app, ["syosetu", "sample", "--target", "50", "--yes"])
+        assert again.exit_code == 0 and "nothing to read" in again.output
+
+    stats = runner.invoke(app, ["cache", "stats"])
+    assert "chapter" not in stats.output  # raw chapter text was deleted after analysis
+    done = runner.invoke(app, ["analyse"])
+    assert done.exit_code == 0 and "statistics for 4 novels" in done.output
+
+
+def test_syosetu_sample_dry_run_sends_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("WN_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("wn.collector.http.DEFAULT_DELAY", 0.0)
+    with respx.mock(assert_all_called=False) as router:
+        _fake_syosetu(router)
+        runner.invoke(app, ["syosetu", "discover", "--limit", "10"])
+        calls_before = len(router.calls)
+        result = runner.invoke(app, ["syosetu", "sample", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "novels to read:  4" in result.output
+        assert len(router.calls) == calls_before

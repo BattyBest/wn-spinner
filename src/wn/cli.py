@@ -6,29 +6,26 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 import typer
 
 from . import __version__
 from .collector import Cache, Collector
 from .collector.http import CollectorError
-from .config import POLICIES, ROBOTS_TOKEN, USER_AGENT, data_dir, policy_for
+from .collector.session import open_session
+from .config import DEFAULT_DELAY, POLICIES, ROBOTS_TOKEN, data_dir, policy_for
 from .db import open_catalog
+from .syosetu.cli import app as syosetu_app
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="wn-spinner command line.")
 cache_app = typer.Typer(no_args_is_help=True, help="Inspect or clear the page cache.")
 app.add_typer(cache_app, name="cache")
+app.add_typer(syosetu_app, name="syosetu")
 
 
 @asynccontextmanager
 async def _collector() -> AsyncIterator[Collector]:
-    root = data_dir()
-    conn = open_catalog(root)
-    try:
-        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}) as client:
-            yield Collector(conn, Cache(conn, root / "cache"), client)
-    finally:
-        conn.close()
+    async with open_session() as session:
+        yield session.collector
 
 
 def _fail(message: str) -> typer.Exit:
@@ -97,8 +94,8 @@ def robots(
             typer.echo(f"{path}: {verdict}")
             typer.echo(f"rules for us:   {rules.rule_count(ROBOTS_TOKEN)}")
             typer.echo(f"their delay:    {'none' if theirs is None else f'{theirs:g} s'}")
-            typer.echo(f"our minimum:    {policy.min_delay:g} s")
-            typer.echo(f"delay in force: {max(policy.min_delay, theirs or 0):g} s")
+            typer.echo(f"our default:    {DEFAULT_DELAY:g} s (used when robots.txt sets none)")
+            typer.echo(f"delay in force: {DEFAULT_DELAY if theirs is None else theirs:g} s")
             known = "configured" if host in POLICIES else "default"
             typer.echo(f"daily cap:      {policy.daily_cap} requests ({known} policy)")
 
@@ -137,6 +134,19 @@ def cache_purge(
     finally:
         conn.close()
     typer.echo(f"removed {removed} cached pages")
+
+
+@app.command()
+def analyse() -> None:
+    """Recompute word-frequency ranks and every novel's statistics from stored counts."""
+    from .analysis.store import rebuild_all
+
+    conn = open_catalog(data_dir())
+    try:
+        ranked, scored = rebuild_all(conn)
+    finally:
+        conn.close()
+    typer.echo(f"ranked {ranked} words; recomputed statistics for {scored} novels")
 
 
 @app.command()

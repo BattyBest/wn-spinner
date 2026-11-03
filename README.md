@@ -7,8 +7,11 @@ recommends ones at the right difficulty, and sends you to the source site to rea
 Everything runs on your machine. There is no account and no cloud database: your data
 lives in two SQLite files in `data/`, and the original sites are where you read.
 
-**Status:** early development. Milestone 1 (foundations) is in place: a polite page
-collector, the databases, a local API and a placeholder UI. No novels are collected yet.
+**Status:** early development. Milestones 1 and 2 are in place: a polite page collector,
+the databases, a local API, and Japanese support end to end. `wn syosetu run` collects novels
+from Syosetu, analyses their vocabulary and fills the Discover and Novel detail screens.
+Scoring novels against *your* level (the learner model and placement test) comes next, and
+Chinese after that.
 
 Sources: [Syosetu](https://syosetu.com/) (Japanese) first, then
 [jjwxc](https://www.jjwxc.net/) (Chinese).
@@ -39,15 +42,30 @@ uv run wn cache purge --kind chapter      # delete cached chapter text
 uv run wn serve                           # API and UI on :8000
 ```
 
+### Collecting Syosetu
+
+```sh
+uv run wn syosetu run --limit 200         # rankings, metadata, then chapters; asks before the long part
+uv run wn syosetu sample --dry-run        # the plan for pending novels, nothing sent
+uv run wn syosetu deepen                  # top novels up to 20,000 characters, opened ones first
+uv run wn analyse                         # recompute word ranks and statistics from stored counts
+```
+
+`run` saves rankings and metadata first, so Discover fills within seconds, then reads chapters
+until each novel has about 10,000 characters and analyses each one as it arrives. It can be
+stopped and started again at any point. A first run of 200 novels is a few hundred page
+requests at Syosetu's own 1 s delay. After that, only new or updated novels cost requests.
+
 Data lives in `./data` by default; set `WN_DATA_DIR` to put it elsewhere.
 
 ## Being a good citizen
 
 The collector checks `robots.txt` before any crawl and stops on a disallow, sends an
-honest User-Agent, keeps one connection per host with a minimum delay between requests,
-caps requests per day, backs off on errors, and switches a host off for the day on repeated
+honest User-Agent, keeps one connection per host and waits between requests for as long as
+the host's `Crawl-delay` says (0.5 s when it says nothing), caps requests per day, backs off on errors, and switches a host off for the day on repeated
 failures or a bot-check page. It never tries to get around a challenge. Chapter text is
-only used for analysis and then deleted, and reading always happens on the source site.
+only used for analysis and then deleted, and reading always happens on the source site. Only word
+counts and statistics are kept, and adult (R18) works are never requested.
 
 ## Licence
 

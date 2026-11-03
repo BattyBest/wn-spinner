@@ -7,7 +7,7 @@ def test_health(tmp_path):
     client = TestClient(create_app(tmp_path))
     body = client.get("/api/health").json()
     assert body["status"] == "ok"
-    assert body["catalog_version"] == 1 and body["profile_version"] == 1
+    assert body["catalog_version"] == 2 and body["profile_version"] == 1
 
 
 def test_stats_on_an_empty_catalog(tmp_path):

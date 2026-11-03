@@ -19,7 +19,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from ..config import ROBOTS_TOKEN, ROBOTS_TTL, USER_AGENT, policy_for
+from ..config import DEFAULT_DELAY, ROBOTS_TOKEN, ROBOTS_TTL, USER_AGENT, policy_for
 from .cache import Cache
 from .ratelimit import RateLimiter
 from .robots import RobotsRules
@@ -32,7 +32,7 @@ RETRY_AFTER_CAP = 120.0
 DAY_SECONDS = 24 * 60 * 60
 
 # Outcomes that are real requests to the host (they count toward the daily cap).
-_REQUEST_OUTCOMES = ("ok", "client_error", "retry", "server_error", "network_error", "challenge")
+REQUEST_OUTCOMES = ("ok", "client_error", "retry", "server_error", "network_error", "challenge")
 # Outcomes of a whole fetch that mean the host is in trouble (they feed the breaker).
 _FAILURE_OUTCOMES = ("server_error", "network_error")
 _FETCH_OUTCOMES = ("ok", "client_error", "server_error", "network_error", "challenge")
@@ -135,10 +135,10 @@ class Collector:
         self._conn.commit()
 
     def requests_today(self, host: str) -> int:
-        marks = ",".join("?" * len(_REQUEST_OUTCOMES))
+        marks = ",".join("?" * len(REQUEST_OUTCOMES))
         row = self._conn.execute(
             f"SELECT COUNT(*) FROM fetch_log WHERE host = ? AND ts >= ? AND outcome IN ({marks})",
-            (host, self._day_start(), *_REQUEST_OUTCOMES),
+            (host, self._day_start(), *REQUEST_OUTCOMES),
         ).fetchone()
         return row[0]
 
@@ -196,10 +196,8 @@ class Collector:
         return rules
 
     def _effective_delay(self, host: str, rules: RobotsRules | None) -> float:
-        delay = policy_for(host).min_delay
-        if rules is not None:
-            delay = max(delay, rules.crawl_delay(ROBOTS_TOKEN) or 0.0)
-        return delay
+        theirs = None if rules is None else rules.crawl_delay(ROBOTS_TOKEN)
+        return DEFAULT_DELAY if theirs is None else theirs
 
     # --- public API ---------------------------------------------------------------
 
@@ -223,7 +221,7 @@ class Collector:
             suspended=self.is_suspended(host),
         )
 
-    async def fetch(self, url: str, *, refresh: bool = False) -> FetchResult:
+    async def fetch(self, url: str, *, refresh: bool = False, kind: str = "page") -> FetchResult:
         parts = _split(url)
         host, policy = parts.hostname, policy_for(parts.hostname)
         if not refresh:
@@ -241,7 +239,7 @@ class Collector:
             raise RobotsDisallowed(f"robots.txt on {host} disallows {path}")
         status, body = await self._network(url, "page", host, rules)
         if status == 200:
-            self._cache.put(url, "page", status, body, self._wall())
+            self._cache.put(url, kind, status, body, self._wall())
         return FetchResult(url, status, body, from_cache=False)
 
     # --- the request loop ---------------------------------------------------------
