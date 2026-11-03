@@ -113,20 +113,36 @@ def analyse_text(text: str) -> TextAnalysis:
     result.dialogue_chars = dialogue_chars(text)
     result.sentences = sum(1 for s in _SENTENCE_END.split(text) if s.strip())
 
-    tokenizer = _tokenizer()
-    for chunk in _chunks(text):
-        for morpheme in tokenizer.tokenize(chunk):
-            pos = morpheme.part_of_speech()
-            if pos[0] in _SKIP_POS or pos[1] == "数詞":
-                continue
-            lemma = morpheme.normalized_form()
-            if not _WORDY.search(lemma):
-                continue
-            is_base = morpheme.surface() in (morpheme.dictionary_form(), lemma)
-            if is_base:
-                reading = katakana_to_hiragana(morpheme.reading_form()) or None
-            else:
-                reading = _lemma_reading(lemma)
-            kind = NAME_POS if pos[1] == NAME_POS else pos[0]
-            result.counts[Word(lemma, kind, reading, morpheme.is_oov())] += 1
+    for _surface, word in iter_tokens(text):
+        if word is not None:
+            result.counts[word] += 1
     return result
+
+
+def _word_of(morpheme) -> Word | None:
+    """The countable word for a morpheme, or None for punctuation, numbers and symbols."""
+    pos = morpheme.part_of_speech()
+    if pos[0] in _SKIP_POS or pos[1] == "数詞":
+        return None
+    lemma = morpheme.normalized_form()
+    if not _WORDY.search(lemma):
+        return None
+    if morpheme.surface() in (morpheme.dictionary_form(), lemma):
+        reading = katakana_to_hiragana(morpheme.reading_form()) or None
+    else:
+        reading = _lemma_reading(lemma)
+    kind = NAME_POS if pos[1] == NAME_POS else pos[0]
+    return Word(lemma, kind, reading, morpheme.is_oov())
+
+
+def iter_tokens(text: str):
+    """Yield ``(surface, word)`` in reading order; ``word`` is None where nothing is counted.
+
+    The text is normalised first, so surfaces are NFKC forms. This is the one place that
+    decides what a word is, so analysis, excerpts and the test all agree.
+    """
+    tokenizer = _tokenizer()
+    for chunk in _chunks(normalise(text)):
+        for morpheme in tokenizer.tokenize(chunk):
+            yield morpheme.surface(), _word_of(morpheme)
+        yield "\n", None

@@ -20,6 +20,7 @@ from ..analysis.store import compute_stats, rebuild_all, sampled_chapters, save_
 from ..collector import Cache, Collector
 from ..collector.http import CollectorError, FetchFailed
 from ..config import DEFAULT_DELAY
+from ..learner.excerpts import PER_NOVEL, save_excerpts
 from .api import (
     NOVEL_BATCH,
     RANK_LISTS,
@@ -207,8 +208,10 @@ async def sample_novel(
         pages += 1
         if result.status != 200:
             break  # a missing or withdrawn chapter ends this novel's sample
-        analysis = analyse_text(parse_chapter(result.body).text)
+        text = parse_chapter(result.body).text
+        analysis = analyse_text(text)
         save_sample(conn, novel.id, number, analysis)
+        save_excerpts(conn, novel.id, number, text)
         cache.delete(url)
         novel.have[number] = analysis.chars
     with conn:
@@ -263,6 +266,53 @@ async def sample_all(
             f"({time.monotonic() - started:.0f} s elapsed)"
         )
     return result
+
+
+def novels_without_excerpts(
+    conn: sqlite3.Connection, limit: int | None = None
+) -> list[sqlite3.Row]:
+    """Sampled novels that have no test excerpts yet, opened ones first, then popular."""
+    rows = conn.execute(
+        "SELECT n.id, n.external_id, n.kind, MIN(s.chapter_no) AS chapter_no FROM novel n"
+        " JOIN sample s ON s.novel_id = n.id"
+        " WHERE n.source_id = ? AND NOT EXISTS (SELECT 1 FROM excerpt e WHERE e.novel_id = n.id)"
+        " GROUP BY n.id ORDER BY n.opened_at IS NULL, n.opened_at DESC, n.points DESC, n.id",
+        (source_id(conn),),
+    ).fetchall()
+    return rows[:limit] if limit else rows
+
+
+async def fill_excerpts(
+    collector: Collector,
+    cache: Cache,
+    conn: sqlite3.Connection,
+    novels: list[sqlite3.Row],
+    progress: Progress = _quiet,
+) -> tuple[int, int]:
+    """Fetch one chapter per novel and keep up to PER_NOVEL excerpts from it.
+
+    Returns ``(novels filled, pages fetched)``. Stops quietly when the host says stop.
+    """
+    filled = pages = 0
+    for index, novel in enumerate(novels, start=1):
+        url = chapter_url(novel["external_id"], novel["chapter_no"], novel["kind"] or "serial")
+        try:
+            result = await collector.fetch(url, kind="chapter")
+            pages += 1
+            if result.status != 200:
+                continue
+            text = parse_chapter(result.body).text
+            cache.delete(url)
+            if save_excerpts(conn, novel["id"], novel["chapter_no"], text, want=PER_NOVEL):
+                filled += 1
+        except (ParseError, FetchFailed) as exc:
+            progress(f"{novel['external_id']}: skipped ({exc})")
+        except CollectorError as exc:
+            progress(f"stopped: {exc}")
+            break
+        if index % 20 == 0:
+            progress(f"excerpts: {index} of {len(novels)} novels")
+    return filled, pages
 
 
 def finish(conn: sqlite3.Connection) -> tuple[int, int]:

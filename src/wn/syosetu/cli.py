@@ -123,3 +123,30 @@ def run(
         await _sample(session, target=target, deepen=False, limit=None, yes=yes, dry_run=False)
 
     _run(go)
+
+
+@app.command()
+def excerpts(
+    limit: int = typer.Option(None, help="Only fill this many novels."),
+    yes: bool = _YES,
+) -> None:
+    """Fetch one chapter for each sampled novel without test excerpts and keep up to 3."""
+
+    async def go(session: Session) -> None:
+        novels = pipeline.novels_without_excerpts(session.conn, limit)
+        if not novels:
+            _say("nothing to do: every sampled novel already has excerpts")
+            return
+        await session.collector.rules(pipeline.CHAPTER_HOST)
+        plan = session.collector.plan(f"https://{pipeline.CHAPTER_HOST}/")
+        seconds = len(novels) * (plan.delay if plan.robots_known else 0.5)
+        _say(f"novels to fill: {len(novels)} (one page each, {_minutes(seconds)})")
+        _say(f"requests left:  {plan.cap_remaining} on {pipeline.CHAPTER_HOST} today")
+        if not yes and not typer.confirm("Start?"):
+            raise typer.Abort()
+        filled, pages = await pipeline.fill_excerpts(
+            session.collector, session.cache, session.conn, novels, _say
+        )
+        _say(f"done: {filled} novels now have excerpts, {pages} pages fetched")
+
+    _run(go)
