@@ -7,6 +7,7 @@ daily caps and the circuit breaker apply as for any other fetch. State lives in
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import math
 import sqlite3
@@ -19,7 +20,7 @@ from ..analysis.japanese import analyse_text
 from ..analysis.store import compute_stats, rebuild_all, sampled_chapters, save_sample
 from ..collector import Cache, Collector
 from ..collector.http import CollectorError, FetchFailed
-from ..config import DEFAULT_DELAY
+from ..config import DEFAULT_DELAY, MAX_CONNECTIONS
 from .api import (
     NOVEL_BATCH,
     RANK_LISTS,
@@ -232,36 +233,53 @@ async def sample_all(
     novels: list[Pending],
     target: int,
     progress: Progress = _quiet,
+    workers: int = MAX_CONNECTIONS,
 ) -> RunResult:
-    """Sample each novel in turn. Stops cleanly when the host says stop; resume later."""
+    """Sample the novels, up to ``workers`` at a time. Stops cleanly when the host says stop.
+
+    Workers overlap their waits for responses, but the collector still starts requests no
+    closer together than the host's delay. Resume later by running the same command.
+    """
     result = RunResult()
     parse_failures = 0
     started = time.monotonic()
-    for index, novel in enumerate(novels, start=1):
-        try:
-            result.pages += await sample_novel(collector, cache, conn, novel, target)
-        except ParseError as exc:
-            parse_failures += 1
-            result.skipped += 1
-            progress(f"{novel.ncode}: skipped ({exc})")
-            if parse_failures >= PARSE_FAILURES_BEFORE_STOP:
-                result.stopped = "chapter pages no longer parse; the site layout may have changed"
-                break
-            continue
-        except FetchFailed as exc:
-            result.skipped += 1
-            progress(f"{novel.ncode}: skipped ({exc})")
-            continue
-        except CollectorError as exc:  # robots disallow, suspended host, daily cap
-            result.stopped = str(exc)
-            break
-        parse_failures = 0
-        result.novels_done += 1
-        progress(
-            f"[{index}/{len(novels)}] {novel.ncode}: "
-            f"{sum(novel.have.values())} chars from {len(novel.have)} chapters "
-            f"({time.monotonic() - started:.0f} s elapsed)"
-        )
+    queue = iter(novels)
+
+    async def worker() -> None:
+        nonlocal parse_failures
+        for novel in queue:
+            if result.stopped:
+                return
+            try:
+                result.pages += await sample_novel(collector, cache, conn, novel, target)
+            except ParseError as exc:
+                parse_failures += 1
+                result.skipped += 1
+                progress(f"{novel.ncode}: skipped ({exc})")
+                if parse_failures >= PARSE_FAILURES_BEFORE_STOP:
+                    result.stopped = (
+                        "chapter pages no longer parse; the site layout may have changed"
+                    )
+                    return
+                continue
+            except FetchFailed as exc:
+                result.skipped += 1
+                progress(f"{novel.ncode}: skipped ({exc})")
+                continue
+            except CollectorError as exc:  # robots disallow, suspended host, daily cap
+                result.stopped = result.stopped or str(exc)
+                return
+            parse_failures = 0
+            result.novels_done += 1
+            progress(
+                f"[{result.novels_done + result.skipped}/{len(novels)}] {novel.ncode}: "
+                f"{sum(novel.have.values())} chars from {len(novel.have)} chapters "
+                f"({time.monotonic() - started:.0f} s elapsed)"
+            )
+
+    async with asyncio.TaskGroup() as group:
+        for _ in range(max(1, min(workers, len(novels)))):
+            group.create_task(worker())
     return result
 
 

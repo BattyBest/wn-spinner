@@ -61,9 +61,11 @@ Data lives in `./data` by default; set `WN_DATA_DIR` to put it elsewhere.
 ## Being a good citizen
 
 The collector checks `robots.txt` before any crawl and stops on a disallow, sends an
-honest User-Agent, keeps one connection per host and waits between requests for as long as
-the host's `Crawl-delay` says (0.5 s when it says nothing), caps requests per day, backs off on errors, and switches a host off for the day on repeated
-failures or a bot-check page. It never tries to get around a challenge. Chapter text is
+honest User-Agent, spaces the start of each request to a host by the host's `Crawl-delay`
+(0.5 s when it says nothing), measured from start to start, so a slow response does not add to
+it. Up to 10 requests to one host may be in flight at once, but never started closer together than
+that delay. It also caps requests per day, backs off on errors (holding the whole host), and
+switches a host off for the day on repeated failures or a bot-check page. It never tries to get around a challenge. Chapter text is
 only used for analysis and then deleted, and reading always happens on the source site. Only word
 counts and statistics are kept, and adult (R18) works are never requested.
 

@@ -15,6 +15,10 @@ DAY = 24 * 60 * 60
 # sets one, otherwise this. There is no extra floor on top of what the site asks for.
 DEFAULT_DELAY = 0.5
 
+# Requests to one host may overlap, but their starts stay spaced by the delay above, so
+# this only matters when a response takes longer than the delay. It is a hard maximum.
+MAX_CONNECTIONS = 10
+
 
 @dataclass(frozen=True)
 class HostPolicy:
