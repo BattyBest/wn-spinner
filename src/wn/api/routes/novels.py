@@ -10,6 +10,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from ... import lang as languages
 from ...analysis.store import COVER_STEPS, rare_words
 from ...collector.http import REQUEST_OUTCOMES
 from ...config import DAY, POLICIES
@@ -21,10 +22,11 @@ from ...learner.coverage import (
     unknown_words,
     weakest_domain,
 )
-from ...syosetu.store import source_id
 from ..personal import open_context
 
 router = APIRouter()
+
+Lang = Literal["ja", "zh"]
 
 SORTS = {
     "popularity": "n.points DESC NULLS LAST, n.id",
@@ -34,8 +36,9 @@ SORTS = {
 }
 CARD_COLUMNS = (
     "n.id, n.external_id AS ncode, n.title, n.author, n.genre, n.kind, n.status,"
-    " n.chapter_count, n.length_chars, n.is_r15, n.points, n.url, n.last_up,"
-    " s.cover_1k, s.cover_3k, s.cover_10k, s.kanji_pct, s.dialogue_pct, s.sample_chars"
+    " n.chapter_count, n.length_chars, n.is_r15, n.is_mature, n.points, n.favourites, n.url,"
+    " n.last_up, s.cover_1k, s.cover_3k, s.cover_10k, s.kanji_pct, s.idiom_rate,"
+    " s.dialogue_pct, s.sample_chars"
 )
 
 
@@ -59,6 +62,7 @@ def _card(row) -> dict:
             "cover_3k": row["cover_3k"],
             "cover_10k": row["cover_10k"],
             "kanji_pct": row["kanji_pct"],
+            "idiom_rate": row["idiom_rate"],
             "dialogue_pct": row["dialogue_pct"],
             "sample_chars": row["sample_chars"],
         }
@@ -73,7 +77,9 @@ def _card(row) -> dict:
         "chapter_count": row["chapter_count"],
         "length_chars": row["length_chars"],
         "is_r15": bool(row["is_r15"]),
+        "is_mature": bool(row["is_mature"]),
         "points": row["points"],
+        "favourites": row["favourites"],
         "url": row["url"],
         "last_up": row["last_up"],
         "stats": stats,
@@ -88,7 +94,8 @@ def list_novels(
     min_length: int | None = Query(None, ge=0),
     max_length: int | None = Query(None, ge=0),
     completed: bool = False,
-    hide_r15: bool = False,
+    hide_r15: bool = Query(False, description="Hide R15 (Syosetu) and Mature (jjwxc) works."),
+    lang: Lang = "ja",
     min_cover_3k: float | None = Query(None, ge=0, le=1),
     sort: Literal["popularity", "easiest", "updated", "length", "best"] = "popularity",
     band: Literal["comfortable", "stretch", "hard", "too_hard"] | None = None,
@@ -104,7 +111,8 @@ def list_novels(
     limit: int = Query(24, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> dict:
-    where, args = ["n.source_id = ?"], [None]
+    where = ["n.source_id IN (SELECT id FROM source WHERE language = ?)"]
+    args: list = [lang]
     if q:
         like = f"%{q.replace('%', '').replace('_', '')}%"
         where.append("(n.title LIKE ? OR n.author LIKE ?)")
@@ -121,15 +129,14 @@ def list_novels(
     if completed:
         where.append("n.status = 'completed'")
     if hide_r15:
-        where.append("n.is_r15 = 0")
+        where.append("n.is_r15 = 0 AND n.is_mature = 0")
     if min_cover_3k is not None:
         where.append("s.cover_3k >= ?")
         args.append(min_cover_3k)
 
-    ctx = open_context(request)
+    ctx = open_context(request, lang)
     conn = ctx.catalog
     try:
-        args[0] = source_id(conn)
         base = " FROM novel n LEFT JOIN novel_stats s ON s.novel_id = n.id WHERE " + " AND ".join(
             where
         )
@@ -268,7 +275,18 @@ def _rank_for_me(
 
 @router.get("/novels/{novel_id}")
 def get_novel(novel_id: int, request: Request) -> dict:
-    ctx = open_context(request)
+    peek = open_catalog(request.app.state.data_dir)
+    try:
+        found = peek.execute(
+            "SELECT s.language, s.name FROM novel n JOIN source s ON s.id = n.source_id"
+            " WHERE n.id = ?",
+            (novel_id,),
+        ).fetchone()
+    finally:
+        peek.close()
+    if found is None:
+        raise HTTPException(404, "no such novel")
+    ctx = open_context(request, found["language"])
     conn = ctx.catalog
     try:
         row = conn.execute(
@@ -279,7 +297,13 @@ def get_novel(novel_id: int, request: Request) -> dict:
         if row is None:
             raise HTTPException(404, "no such novel")
         detail = _card(row)
-        detail.update(synopsis=row["synopsis"], keywords=row["keywords"], first_up=row["first_up"])
+        detail.update(
+            synopsis=row["synopsis"],
+            keywords=row["keywords"],
+            first_up=row["first_up"],
+            language=found["language"],
+            source=found["name"],
+        )
 
         stats = conn.execute("SELECT * FROM novel_stats WHERE novel_id = ?", (novel_id,)).fetchone()
         if stats is None:
@@ -298,6 +322,7 @@ def get_novel(novel_id: int, request: Request) -> dict:
                     "cover_10k",
                     "sentence_len",
                     "kanji_pct",
+                    "idiom_rate",
                     "dialogue_pct",
                     "rare_load",
                 )
@@ -343,12 +368,14 @@ def note_opened(novel_id: int, request: Request) -> None:
 
 
 @router.get("/genres")
-def list_genres(request: Request) -> list[dict]:
+def list_genres(request: Request, lang: Lang = "ja") -> list[dict]:
     conn = open_catalog(request.app.state.data_dir)
     try:
         rows = conn.execute(
-            "SELECT genre, COUNT(*) AS novels FROM novel WHERE genre IS NOT NULL"
-            " GROUP BY genre ORDER BY novels DESC, genre"
+            "SELECT genre, COUNT(*) AS novels FROM novel"
+            " WHERE genre IS NOT NULL AND source_id IN (SELECT id FROM source WHERE language = ?)"
+            " GROUP BY genre ORDER BY novels DESC, genre",
+            (lang,),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -356,14 +383,19 @@ def list_genres(request: Request) -> list[dict]:
 
 
 @router.get("/collect/status")
-def collect_status(request: Request) -> dict:
+def collect_status(request: Request, lang: Lang = "ja") -> dict:
     conn = open_catalog(request.app.state.data_dir)
     try:
+        mine = (
+            "(SELECT id FROM novel WHERE source_id IN (SELECT id FROM source WHERE language = ?))"
+        )
         counts = conn.execute(
             "SELECT COUNT(*) AS novels,"
-            " (SELECT COUNT(DISTINCT novel_id) FROM sample) AS sampled,"
-            " (SELECT COUNT(*) FROM novel_stats) AS analysed,"
-            " (SELECT MAX(fetched_at) FROM sample) AS last_sample FROM novel"
+            f" (SELECT COUNT(DISTINCT novel_id) FROM sample WHERE novel_id IN {mine}) AS sampled,"
+            f" (SELECT COUNT(*) FROM novel_stats WHERE novel_id IN {mine}) AS analysed,"
+            f" (SELECT MAX(fetched_at) FROM sample WHERE novel_id IN {mine}) AS last_sample"
+            " FROM novel WHERE source_id IN (SELECT id FROM source WHERE language = ?)",
+            (lang, lang, lang, lang),
         ).fetchone()
         now = time.time()
         day_start = now - now % DAY
@@ -393,7 +425,9 @@ def collect_status(request: Request) -> dict:
             "sampled": counts["sampled"],
             "analysed": counts["analysed"],
             "last_sample_at": counts["last_sample"],
-            "hosts": [h for h in hosts if h["requests_today"] or h["host"].endswith("syosetu.com")],
+            "hosts": [
+                h for h in hosts if h["requests_today"] or h["host"] in languages.get(lang).hosts
+            ],
         }
     finally:
         conn.close()

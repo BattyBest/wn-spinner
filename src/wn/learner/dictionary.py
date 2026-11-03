@@ -1,9 +1,10 @@
-"""Reference dictionaries: JMdict glosses and tags, and JLPT word lists.
+"""Reference dictionaries: JMdict and CC-CEDICT glosses, and the JLPT and HSK word lists.
 
-Both are downloaded once into ``data/dicts/`` and are never committed (JMdict is CC BY-SA
-from the EDRDG; the JLPT lists are community lists, CC BY). Loading adds glosses and tags
-to catalog lemmas, records every written form JMdict knows (to check made-up test words)
-and stores the JLPT lists.
+All are downloaded once into ``data/dicts/`` and are never committed (JMdict is CC BY-SA
+from the EDRDG; the JLPT lists are community lists, CC BY; CC-CEDICT is CC BY-SA from MDBG;
+the HSK lists come from the MIT-licensed complete-hsk-vocabulary project). Loading adds
+glosses (and, for Chinese, pinyin) to catalog lemmas, records every written form the
+dictionary knows (to check made-up test words) and stores the level lists.
 
 The JMdict file is the JSON build from the jmdict-simplified project, as a ``.json``,
 ``.json.zip`` or ``.json.tgz``. It is read as a stream, one entry at a time, so a load
@@ -13,6 +14,7 @@ needs memory for the file's text, not for a parsed copy of it.
 from __future__ import annotations
 
 import csv
+import gzip
 import hashlib
 import io
 import json
@@ -26,9 +28,9 @@ from pathlib import Path
 
 import httpx
 
+from .. import lang as languages
 from ..analysis.japanese import NAME_POS, normalise
 from ..config import USER_AGENT
-from . import LANGUAGE
 
 JMDICT_RELEASES = "https://api.github.com/repos/scriptin/jmdict-simplified/releases/latest"
 # Release assets are named like jmdict-eng-3.6.2+20261102210542.json.zip (version, then
@@ -38,6 +40,8 @@ JLPT_URLS = {
     level: f"https://raw.githubusercontent.com/jamsinclair/open-anki-jlpt-decks/main/src/n{level}.csv"
     for level in (5, 4, 3, 2, 1)
 }
+CEDICT_URL = "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.zip"
+HSK_URL = "https://raw.githubusercontent.com/drkameleon/complete-hsk-vocabulary/main/complete.json"
 GLOSS_MAX = 80
 # JMdict "misc" tags worth keeping beside the field tags: register and usage.
 USAGE_TAGS = {"col", "sl", "fam", "vulg", "hon", "hum", "pol", "arch", "form", "uk", "derog"}
@@ -141,7 +145,7 @@ def load_jmdict(conn: sqlite3.Connection, path: Path, now: float | None = None) 
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
     wanted: dict[str, list[int]] = {}
     for row in conn.execute(
-        "SELECT id, lemma FROM lemma WHERE language = ? AND pos != ?", (LANGUAGE, NAME_POS)
+        "SELECT id, lemma FROM lemma WHERE language = 'ja' AND pos != ?", (NAME_POS,)
     ):
         wanted.setdefault(row["lemma"], []).append(row["id"])
 
@@ -162,14 +166,18 @@ def load_jmdict(conn: sqlite3.Connection, path: Path, now: float | None = None) 
                 if form not in best or key < best[form][0]:
                     best[form] = (key, entry)
     with conn:
-        conn.execute("DELETE FROM dict_form")
-        conn.executemany("INSERT OR IGNORE INTO dict_form (form, entry_id) VALUES (?, ?)", forms)
-        conn.execute("UPDATE lemma SET gloss = NULL, jmdict_id = NULL, tags = NULL")
+        conn.execute("DELETE FROM dict_form WHERE language = 'ja'")
+        conn.executemany(
+            "INSERT OR IGNORE INTO dict_form (language, form, entry_id) VALUES ('ja', ?, ?)", forms
+        )
+        conn.execute(
+            "UPDATE lemma SET gloss = NULL, dict_id = NULL, tags = NULL WHERE language = 'ja'"
+        )
         matched = 0
         for form, (_key, entry) in best.items():
             for lemma_id in wanted[form]:
                 conn.execute(
-                    "UPDATE lemma SET gloss = ?, jmdict_id = ?, tags = ? WHERE id = ?",
+                    "UPDATE lemma SET gloss = ?, dict_id = ?, tags = ? WHERE id = ?",
                     (entry_gloss(entry) or None, int(entry["id"]), entry_tags(entry), lemma_id),
                 )
                 matched += 1
@@ -252,15 +260,213 @@ def load_jlpt(
     if not rows:
         raise DictError("no JLPT words found; give a CSV with a word column and a level")
     with conn:
-        conn.execute("DELETE FROM jlpt_word")
+        conn.execute("DELETE FROM level_word WHERE language = 'ja'")
         conn.executemany(
-            "INSERT INTO jlpt_word (lemma, reading, level) VALUES (?, ?, ?)",
+            "INSERT INTO level_word (language, lemma, reading, level) VALUES ('ja', ?, ?, ?)",
             [(w, r, level) for (w, r), level in rows.items()],
         )
         conn.execute(
             "INSERT OR REPLACE INTO dict_meta (name, version, source, sha256, entries, loaded_at)"
             " VALUES ('jlpt', NULL, ?, NULL, ?, ?)",
             (", ".join(p.name for p, _ in files), len(rows), time.time() if now is None else now),
+        )
+    return len(rows)
+
+
+# --- CC-CEDICT -----------------------------------------------------------------------------
+
+_CEDICT_LINE = re.compile(r"^(\S+) (\S+) \[([^\]]*)\] /(.*)/\s*$")
+_SYLLABLE = re.compile(r"([A-Za-z:]+?)([1-5])(?![0-9])")
+_TONE_MARKS = {
+    "a": "āáǎàa",
+    "e": "ēéěèe",
+    "i": "īíǐìi",
+    "o": "ōóǒòo",
+    "u": "ūúǔùu",
+    "ü": "ǖǘǚǜü",
+}
+# Entries that only point at another entry make poor glosses for a word.
+_WEAK_GLOSS = ("surname ", "variant of", "old variant of", "erhua variant", "see ", "abbr. for")
+
+
+def _mark_syllable(match: re.Match) -> str:
+    syllable, tone = match.group(1), int(match.group(2))
+    lower = syllable.lower().replace("u:", "ü").replace("v", "ü")
+    if "a" in lower:
+        target = lower.index("a")
+    elif "e" in lower:
+        target = lower.index("e")
+    elif "ou" in lower:
+        target = lower.index("o")
+    else:
+        vowels = [i for i, c in enumerate(lower) if c in _TONE_MARKS]
+        if not vowels:
+            return lower
+        target = vowels[-1]
+    marked = lower[:target] + _TONE_MARKS[lower[target]][tone - 1] + lower[target + 1 :]
+    return marked[0].upper() + marked[1:] if syllable[0].isupper() else marked
+
+
+def pinyin_marks(numeric: str) -> str:
+    """``ni3 hao3`` -> ``nǐ hǎo``; ``lu:e4`` -> ``lüè``. Anything without a tone stays."""
+    return _SYLLABLE.sub(_mark_syllable, numeric)
+
+
+def parse_cedict_line(line: str) -> dict | None:
+    """One CC-CEDICT entry, or None for comments and lines that don't parse."""
+    if line.startswith("#"):
+        return None
+    match = _CEDICT_LINE.match(line)
+    if not match:
+        return None
+    traditional, simplified, pinyin, body = match.groups()
+    meanings = [m for m in body.split("/") if m]
+    return {
+        "traditional": normalise(traditional),
+        "simplified": normalise(simplified),
+        "pinyin": pinyin_marks(pinyin),
+        "meanings": meanings,
+    }
+
+
+def cedict_gloss(meanings: list[str]) -> str:
+    """A short English gloss: the first three meanings, without classifier notes."""
+    kept = [m for m in meanings if not m.startswith("CL:")][:3]
+    text = "; ".join(kept)
+    return text if len(text) <= GLOSS_MAX else text[: GLOSS_MAX - 1].rstrip(", ;") + "…"
+
+
+def _weak(meanings: list[str]) -> bool:
+    first = meanings[0].lower() if meanings else ""
+    return first.startswith(_WEAK_GLOSS)
+
+
+def _read_text(path: Path) -> str:
+    """The text of a CC-CEDICT file: plain, ``.gz`` or a ``.zip`` holding one text file."""
+    name = path.name.lower()
+    if name.endswith(".gz"):
+        return gzip.decompress(path.read_bytes()).decode("utf-8")
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(path) as archive:
+            members = [m for m in archive.namelist() if m.lower().endswith((".u8", ".txt"))]
+            if not members:
+                raise DictError(f"{path.name} contains no CC-CEDICT text file")
+            return archive.read(members[0]).decode("utf-8")
+    return path.read_text(encoding="utf-8")
+
+
+def cedict_version(text: str) -> str:
+    for line in text.splitlines()[:40]:
+        if line.startswith("#!") and "date=" in line:
+            return line.split("date=", 1)[1].strip()
+    return ""
+
+
+def load_cedict(conn: sqlite3.Connection, path: Path, now: float | None = None) -> dict:
+    """Load CC-CEDICT: forms, then pinyin and glosses onto matching Chinese lemmas."""
+    text = _read_text(path)
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    wanted: dict[str, list[int]] = {}
+    for row in conn.execute(
+        "SELECT id, lemma FROM lemma WHERE language = 'zh' AND pos != ?",
+        (languages.ZH.name_pos,),
+    ):
+        wanted.setdefault(row["lemma"], []).append(row["id"])
+
+    best: dict[str, tuple[tuple, dict]] = {}
+    forms: list[tuple[str, int]] = []
+    entries = 0
+    for line in text.splitlines():
+        entry = parse_cedict_line(line)
+        if entry is None:
+            continue
+        entries += 1
+        forms.extend(
+            (form, entries) for form in dict.fromkeys((entry["simplified"], entry["traditional"]))
+        )
+        word = entry["simplified"]
+        if word in wanted:
+            key = (1 if _weak(entry["meanings"]) else 0, entries)
+            if word not in best or key < best[word][0]:
+                best[word] = (key, {**entry, "id": entries})
+    with conn:
+        conn.execute("DELETE FROM dict_form WHERE language = 'zh'")
+        conn.executemany(
+            "INSERT OR IGNORE INTO dict_form (language, form, entry_id) VALUES ('zh', ?, ?)",
+            forms,
+        )
+        conn.execute(
+            "UPDATE lemma SET gloss = NULL, dict_id = NULL, tags = NULL, reading = NULL"
+            " WHERE language = 'zh'"
+        )
+        matched = 0
+        for word, (_key, entry) in best.items():
+            tags = "idiom" if any("(idiom)" in m for m in entry["meanings"]) else ""
+            for lemma_id in wanted[word]:
+                conn.execute(
+                    "UPDATE lemma SET gloss = ?, dict_id = ?, tags = ?, reading = ? WHERE id = ?",
+                    (
+                        cedict_gloss(entry["meanings"]) or None,
+                        entry["id"],
+                        tags,
+                        entry["pinyin"],
+                        lemma_id,
+                    ),
+                )
+                matched += 1
+        conn.execute(
+            "INSERT OR REPLACE INTO dict_meta (name, version, source, sha256, entries, loaded_at)"
+            " VALUES ('cedict', ?, ?, ?, ?, ?)",
+            (cedict_version(text), path.name, sha, entries, time.time() if now is None else now),
+        )
+    return {"entries": entries, "forms": len(forms), "lemmas_matched": matched}
+
+
+# --- HSK lists -------------------------------------------------------------------------------
+
+
+def parse_hsk(text: str) -> list[tuple[str, str, int]]:
+    """``(word, pinyin, level)`` for the HSK 3.0 levels in a complete-hsk-vocabulary JSON.
+
+    Level 7 means HSK 7-9. A word in several levels keeps the easiest.
+    """
+    try:
+        entries = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise DictError(f"the HSK list is not valid JSON: {exc}") from exc
+    out: dict[str, tuple[str, int]] = {}
+    for entry in entries:
+        levels = [
+            int(level.split("-", 1)[1])
+            for level in entry.get("level", [])
+            if re.fullmatch(r"new-[1-7]", level)
+        ]
+        word = normalise(entry.get("simplified", "").strip())
+        if not levels or not word:
+            continue
+        forms = entry.get("forms") or [{}]
+        pinyin = forms[0].get("transcriptions", {}).get("pinyin", "")
+        if word not in out or min(levels) < out[word][1]:
+            out[word] = (pinyin, min(levels))
+    return [(w, p, level) for w, (p, level) in out.items()]
+
+
+def load_hsk(conn: sqlite3.Connection, path: Path, now: float | None = None) -> int:
+    """Replace the HSK 3.0 list with the one in ``path`` (complete.json from the project)."""
+    rows = parse_hsk(path.read_text(encoding="utf-8"))
+    if not rows:
+        raise DictError("no HSK 3.0 words found in the file")
+    with conn:
+        conn.execute("DELETE FROM level_word WHERE language = 'zh'")
+        conn.executemany(
+            "INSERT OR REPLACE INTO level_word (language, lemma, reading, level)"
+            " VALUES ('zh', ?, ?, ?)",
+            [(w, p, level) for w, p, level in rows],
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO dict_meta (name, version, source, sha256, entries, loaded_at)"
+            " VALUES ('hsk', NULL, ?, NULL, ?, ?)",
+            (path.name, len(rows), time.time() if now is None else now),
         )
     return len(rows)
 
@@ -311,14 +517,34 @@ def fetch_jlpt(root: Path, client: httpx.Client, say=lambda _m: None) -> list[tu
     return out
 
 
+def fetch_cedict(root: Path, client: httpx.Client, say=lambda _m: None) -> Path:
+    """Download CC-CEDICT from MDBG."""
+    dest = dicts_dir(root) / "cedict_1_0_ts_utf-8_mdbg.zip"
+    say("downloading CC-CEDICT")
+    _download(client, CEDICT_URL, dest)
+    return dest
+
+
+def fetch_hsk(root: Path, client: httpx.Client, say=lambda _m: None) -> Path:
+    """Download the HSK vocabulary lists (complete.json, about 10 MB)."""
+    dest = dicts_dir(root) / "hsk-complete.json"
+    say("downloading the HSK lists")
+    _download(client, HSK_URL, dest)
+    return dest
+
+
 def new_client() -> httpx.Client:
     return httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=60)
 
 
-def status(conn: sqlite3.Connection) -> dict:
+def status(conn: sqlite3.Connection, lang: str = "ja") -> dict:
     meta = {r["name"]: dict(r) for r in conn.execute("SELECT * FROM dict_meta")}
     glossed = conn.execute(
         "SELECT COUNT(*) FROM lemma WHERE gloss IS NOT NULL AND corpus_rank IS NOT NULL"
+        " AND language = ?",
+        (lang,),
     ).fetchone()[0]
-    ranked = conn.execute("SELECT COUNT(*) FROM lemma WHERE corpus_rank IS NOT NULL").fetchone()[0]
+    ranked = conn.execute(
+        "SELECT COUNT(*) FROM lemma WHERE corpus_rank IS NOT NULL AND language = ?", (lang,)
+    ).fetchone()[0]
     return {"meta": meta, "ranked_lemmas": ranked, "glossed_lemmas": glossed}

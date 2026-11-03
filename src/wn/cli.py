@@ -143,23 +143,30 @@ def analyse(
     domains: bool = typer.Option(
         False, "--domains", help="Also recompute every word's domain weights."
     ),
+    lang: str = typer.Option(None, "--lang", help="Only this language: ja or zh (default both)."),
 ) -> None:
     """Recompute word-frequency ranks and every novel's statistics from stored counts."""
+    from . import lang as languages
     from .analysis.store import rebuild_all
     from .learner.domains import rebuild_domains
 
+    if lang is not None and lang not in languages.CODES:
+        raise _fail(f"--lang must be one of: {', '.join(languages.CODES)}")
     conn = open_catalog(data_dir())
     try:
-        ranked, scored = rebuild_all(conn)
-        typer.echo(f"ranked {ranked} words; recomputed statistics for {scored} novels")
-        if domains:
-            report = rebuild_domains(conn)
-            typer.echo(
-                f"domains: {report.dictionary} dictionary tags, {report.learned} learned weights"
-            )
-            for key, members in report.groups.items():
-                note = "  (too few novels, skipped)" if key in report.skipped else ""
-                typer.echo(f"  {key:<9} {members:>4} novels{note}")
+        for code in [lang] if lang else languages.CODES:
+            ranked, scored = rebuild_all(conn, code)
+            label = languages.get(code).name
+            typer.echo(f"{label}: ranked {ranked} words; recomputed statistics for {scored} novels")
+            if domains:
+                report = rebuild_domains(conn, code)
+                typer.echo(
+                    f"{label} domains: {report.dictionary} dictionary tags, "
+                    f"{report.learned} learned weights"
+                )
+                for key, members in report.groups.items():
+                    note = "  (too few novels, skipped)" if key in report.skipped else ""
+                    typer.echo(f"  {key:<9} {members:>4} novels{note}")
     finally:
         conn.close()
 

@@ -22,7 +22,6 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 
-from . import LANGUAGE
 from .domains import DOMAIN_KEYS
 
 SLOPE = 1.5
@@ -178,6 +177,7 @@ class Lexicon:
     ids: dict[tuple[str, str], int] = field(default_factory=dict)
     keys: dict[int, tuple[str, str]] = field(default_factory=dict)
     max_rank: int = 1
+    lang: str = "ja"
 
     def rank_of(self, lemma_id: int) -> float:
         rank = self.rank.get(lemma_id)
@@ -185,12 +185,17 @@ class Lexicon:
         return float(rank) if rank else self.max_rank * 1.5
 
     @classmethod
-    def load(cls, catalog: sqlite3.Connection, fixes: list[tuple[str, str, str, str]] = ()):
+    def load(
+        cls,
+        catalog: sqlite3.Connection,
+        fixes: list[tuple[str, str, str, str]] = (),
+        lang: str = "ja",
+    ):
         """``fixes`` are ``(lemma, pos, domain, action)`` from profile.db."""
-        lex = cls()
+        lex = cls(lang=lang)
         for row in catalog.execute(
             "SELECT id, lemma, pos, corpus_rank, is_function FROM lemma WHERE language = ?",
-            (LANGUAGE,),
+            (lang,),
         ):
             lex.rank[row["id"]] = row["corpus_rank"]
             lex.keys[row["id"]] = (row["lemma"], row["pos"])
@@ -199,7 +204,11 @@ class Lexicon:
                 lex.function.add(row["id"])
             if row["corpus_rank"] and row["corpus_rank"] > lex.max_rank:
                 lex.max_rank = row["corpus_rank"]
-        for row in catalog.execute("SELECT lemma_id, domain, weight FROM lemma_domain"):
+        for row in catalog.execute(
+            "SELECT ld.lemma_id, ld.domain, ld.weight FROM lemma_domain ld"
+            " JOIN lemma l ON l.id = ld.lemma_id WHERE l.language = ?",
+            (lang,),
+        ):
             lex.weights.setdefault(row["lemma_id"], []).append((row["domain"], row["weight"]))
         for lemma, pos, domain, action in fixes:
             lemma_id = lex.ids.get((lemma, pos))
@@ -236,17 +245,15 @@ class Learner:
 # --- profile.db ------------------------------------------------------------------------
 
 
-def load_fixes(profile: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
+def load_fixes(profile: sqlite3.Connection, lang: str = "ja") -> list[tuple[str, str, str, str]]:
     rows = profile.execute(
-        "SELECT lemma, pos, domain, action FROM domain_fix WHERE language = ?", (LANGUAGE,)
+        "SELECT lemma, pos, domain, action FROM domain_fix WHERE language = ?", (lang,)
     )
     return [(r[0], r[1], r[2], r[3]) for r in rows]
 
 
-def load_status(profile: sqlite3.Connection) -> dict[tuple[str, str], bool]:
-    rows = profile.execute(
-        "SELECT lemma, pos, known FROM word_status WHERE language = ?", (LANGUAGE,)
-    )
+def load_status(profile: sqlite3.Connection, lang: str = "ja") -> dict[tuple[str, str], bool]:
+    rows = profile.execute("SELECT lemma, pos, known FROM word_status WHERE language = ?", (lang,))
     return {(r[0], r[1]): bool(r[2]) for r in rows}
 
 
@@ -259,7 +266,7 @@ def observations(
     fakes = fake_yes = used = 0
     for row in profile.execute(
         "SELECT kind, lemma, pos, known, weight FROM answer WHERE language = ? ORDER BY id",
-        (LANGUAGE,),
+        (lexicon.lang,),
     ):
         used += 1
         if row["kind"] == "fake":
@@ -302,7 +309,7 @@ def refit(profile: sqlite3.Connection, lexicon: Lexicon, now: float | None = Non
             " (language, version, params, guess_rate, answers, fitted_at)"
             " VALUES (?, ?, ?, ?, ?, ?)",
             (
-                LANGUAGE,
+                lexicon.lang,
                 MODEL_VERSION,
                 params.to_json(),
                 g,
@@ -313,13 +320,15 @@ def refit(profile: sqlite3.Connection, lexicon: Lexicon, now: float | None = Non
     return params
 
 
-def load_params(profile: sqlite3.Connection) -> Params:
-    row = profile.execute("SELECT * FROM model WHERE language = ?", (LANGUAGE,)).fetchone()
+def load_params(profile: sqlite3.Connection, lang: str = "ja") -> Params:
+    row = profile.execute("SELECT * FROM model WHERE language = ?", (lang,)).fetchone()
     if row is None:
         return Params()
     return Params.from_json(row["params"], row["guess_rate"], row["answers"])
 
 
-def load_learner(profile: sqlite3.Connection, catalog: sqlite3.Connection) -> Learner:
-    lexicon = Lexicon.load(catalog, load_fixes(profile))
-    return Learner(load_params(profile), lexicon, load_status(profile))
+def load_learner(
+    profile: sqlite3.Connection, catalog: sqlite3.Connection, lang: str = "ja"
+) -> Learner:
+    lexicon = Lexicon.load(catalog, load_fixes(profile, lang), lang)
+    return Learner(load_params(profile, lang), lexicon, load_status(profile, lang))

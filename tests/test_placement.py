@@ -142,7 +142,7 @@ def test_answering_with_nothing_pending_is_refused(world):
 def test_fakes_are_never_real_forms(world):
     _, ids, _, _, _, root = world
     catalog = open_catalog(root)
-    catalog.execute("INSERT INTO dict_form (form, entry_id) VALUES ('魔法', 1)")
+    catalog.execute("INSERT INTO dict_form (language, form, entry_id) VALUES ('ja', '魔法', 1)")
     pool = placement.Pool.load(catalog)
     rng = random.Random(0)
     seen = {placement.make_fake(pool, rng)["text"] for _ in range(60)}

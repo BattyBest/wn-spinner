@@ -8,7 +8,7 @@ from wn.db.migrate import current_version, migrate
 
 def test_fresh_databases_are_created_and_seeded(tmp_path):
     catalog, profile = open_catalog(tmp_path), open_profile(tmp_path)
-    assert current_version(catalog) == 3
+    assert current_version(catalog) == 4
     assert current_version(profile) == 2
     names = [r[0] for r in catalog.execute("SELECT name FROM source ORDER BY name")]
     assert names == ["jjwxc", "syosetu"]

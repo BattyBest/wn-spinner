@@ -26,7 +26,8 @@ def test_tags_map_to_domains():
 def test_every_domain_key_has_a_group_and_a_database_row(conn):
     in_db = [r[0] for r in conn.execute("SELECT key FROM domain ORDER BY position")]
     assert tuple(in_db) == domains.DOMAIN_KEYS
-    assert set(GROUPS) == set(domains.DOMAIN_KEYS)
+    assert set(GROUPS["ja"]) == set(domains.DOMAIN_KEYS)
+    assert set(GROUPS["zh"]) == set(domains.DOMAIN_KEYS)
 
 
 def test_dictionary_tags_give_weight_one(conn):
