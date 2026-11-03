@@ -1,20 +1,25 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { replaceState } from '$app/navigation';
+	import BandBadge from '#lib/BandBadge.svelte';
 	import CoverBar from '#lib/CoverBar.svelte';
 	import {
 		getCollectStatus,
+		getDomains,
 		getGenres,
+		getTestStatus,
 		listNovels,
+		type Band,
 		type CollectStatus,
 		type Genre,
 		type NovelList,
 		type Sort
 	} from '#lib/api';
-	import { STATUS_LABEL, characters } from '#lib/format';
+	import { BAND_HINT, BAND_LABEL, STATUS_LABEL, characters } from '#lib/format';
 
 	const PAGE = 24;
 	const SORTS: { value: Sort; label: string }[] = [
+		{ value: 'best', label: 'Best for me' },
 		{ value: 'popularity', label: 'Most popular' },
 		{ value: 'easiest', label: 'Easiest first' },
 		{ value: 'updated', label: 'Recently updated' },
@@ -34,7 +39,10 @@
 	let showR15 = $state(false); // R15 works are hidden unless asked for
 	let minCover = $state(0);
 	let sort = $state<Sort>('popularity');
+	let band = $state<Band | ''>('');
 	let offset = $state(0);
+	let tested = $state(false); // the placement test has been taken
+	let domainNames = $state<Record<string, string>>({});
 
 	let list = $state<NovelList | null>(null);
 	let genres = $state<Genre[]>([]);
@@ -44,10 +52,17 @@
 	let showFilters = $state(false);
 
 	const activeFilters = $derived(
-		[q, genre, length, completed, showR15, minCover > 0].filter(Boolean).length
+		[q, genre, length, completed, showR15, minCover > 0, band].filter(Boolean).length
 	);
+	const sorts = $derived(tested ? SORTS : SORTS.filter((s) => s.value !== 'best'));
+	const defaultSort = $derived<Sort>(tested ? 'best' : 'popularity');
 
-	onMount(() => {
+	onMount(async () => {
+		try {
+			tested = (await getTestStatus()).answers > 0;
+		} catch {
+			tested = false;
+		}
 		const p = new URLSearchParams(window.location.search);
 		q = p.get('q') ?? '';
 		genre = p.get('genre') ?? '';
@@ -55,11 +70,16 @@
 		completed = p.get('completed') === '1';
 		showR15 = p.get('r15') === 'show';
 		minCover = Number(p.get('cover') ?? 0) || 0;
-		sort = (SORTS.find((s) => s.value === p.get('sort'))?.value ?? 'popularity') as Sort;
+		band = (['comfortable', 'stretch', 'hard', 'too_hard'].find((b) => b === p.get('band')) ??
+			'') as Band | '';
+		sort = (sorts.find((s) => s.value === p.get('sort'))?.value ?? defaultSort) as Sort;
 		offset = Number(p.get('offset') ?? 0) || 0;
 		ready = true;
 		getGenres()
 			.then((g) => (genres = g))
+			.catch(() => undefined);
+		getDomains()
+			.then((d) => (domainNames = Object.fromEntries(d.map((x) => [x.key, x.name_en]))))
 			.catch(() => undefined);
 		getCollectStatus()
 			.then((s) => (status = s))
@@ -80,6 +100,7 @@
 			min_length: span?.min,
 			max_length: span?.max,
 			sort,
+			band: band || undefined,
 			limit: PAGE,
 			offset
 		};
@@ -90,7 +111,8 @@
 		if (completed) url.set('completed', '1');
 		if (showR15) url.set('r15', 'show');
 		if (minCover > 0) url.set('cover', String(minCover));
-		if (sort !== 'popularity') url.set('sort', sort);
+		if (sort !== defaultSort) url.set('sort', sort);
+		if (band) url.set('band', band);
 		if (offset) url.set('offset', String(offset));
 		clearTimeout(timer);
 		timer = setTimeout(async () => {
@@ -108,6 +130,7 @@
 	const changed = () => (offset = 0);
 	const clear = () => {
 		q = genre = length = '';
+		band = '';
 		completed = showR15 = false;
 		minCover = offset = 0;
 	};
@@ -118,10 +141,24 @@
 
 <h1 class="text-2xl font-semibold tracking-tight">Discover</h1>
 <p class="mt-2 text-muted">
-	Japanese web novels from Syosetu. The bar on each card shows how much of the text the 3,000 most
-	common words cover, a stand-in for difficulty until your own level is measured in a later
-	milestone.
+	Japanese web novels from Syosetu.
+	{#if tested}
+		Each card shows how much of the text you are expected to know, and "Best for me" puts the novels
+		closest to a comfortable stretch first.
+	{:else}
+		The bar on each card shows how much of the text the 3,000 most common words cover, a stand-in
+		for difficulty until your own level is measured.
+	{/if}
 </p>
+
+{#if ready && !tested}
+	<div class="mt-4 rounded-xl border border-line bg-surface p-4 text-sm">
+		<a href="/test/" class="font-medium text-accent underline">Take the placement test</a>
+		<span class="text-muted">
+			(about 10 minutes) to see how each novel fits your level and get recommendations.
+		</span>
+	</div>
+{/if}
 
 <div class="mt-5 flex gap-2 md:hidden">
 	<button
@@ -184,11 +221,26 @@
 			onchange={changed}
 			class="mt-1 w-full rounded-lg border border-line bg-bg px-3 py-2"
 		>
-			{#each SORTS as s (s.value)}
+			{#each sorts as s (s.value)}
 				<option value={s.value}>{s.label}</option>
 			{/each}
 		</select>
 	</label>
+	{#if tested}
+		<label class="text-sm">
+			<span class="text-muted">Fit for me</span>
+			<select
+				bind:value={band}
+				onchange={changed}
+				class="mt-1 w-full rounded-lg border border-line bg-bg px-3 py-2"
+			>
+				<option value="">Any, without "too hard"</option>
+				{#each ['comfortable', 'stretch', 'hard', 'too_hard'] as b (b)}
+					<option value={b}>{BAND_LABEL[b]}: {BAND_HINT[b]}</option>
+				{/each}
+			</select>
+		</label>
+	{/if}
 	<label class="text-sm">
 		<span class="text-muted">Top 3,000 words cover at least: {minCover}%</span>
 		<input
@@ -232,6 +284,11 @@
 					metadata first, so this page fills within seconds, then reads chapters in the background.
 				</p>
 			</div>
+		{:else if tested && sort === 'best' && !band}
+			<p class="text-sm text-muted">
+				No novel is within your range yet. Choose Hard or Too hard under "Fit for me" to see what is
+				close, or collect more novels with <code class="font-mono">uv run wn syosetu run</code>.
+			</p>
 		{:else}
 			<p class="text-sm text-muted">No novels match these filters.</p>
 		{/if}
@@ -276,7 +333,26 @@
 						{/if}
 					</p>
 					<div class="mt-3">
-						{#if novel.stats}
+						{#if novel.me}
+							<div class="flex flex-wrap items-center gap-2">
+								<BandBadge band={novel.me.band} coverage={novel.me.coverage} />
+								{#if novel.me.grow}
+									<span class="rounded-full border border-line px-2 py-0.5 text-xs text-muted">
+										Grow pick
+									</span>
+								{/if}
+							</div>
+							<p class="mt-2 text-xs text-muted">
+								About {novel.me.unknown_distinct.toLocaleString('en')} unknown words,
+								{novel.me.unknown_repeating} of them repeat 5 or more times
+								{#if novel.me.top_domains.length}
+									· mostly {novel.me.top_domains
+										.map((d) => domainNames[d] ?? d)
+										.join(' and ')
+										.toLowerCase()}
+								{/if}
+							</p>
+						{:else if novel.stats}
 							<CoverBar value={novel.stats.cover_3k} label="Covered by the top 3,000 words" />
 						{:else}
 							<p class="text-xs text-muted">Not analysed yet</p>

@@ -1,8 +1,16 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import BandBadge from '#lib/BandBadge.svelte';
 	import CoverageCurve from '#lib/CoverageCurve.svelte';
-	import { getNovel, noteOpened, type NovelDetail } from '#lib/api';
-	import { RANK_LABEL, STATUS_LABEL, characters, date, percent } from '#lib/format';
+	import {
+		getNovel,
+		noteOpened,
+		sendFeedback,
+		setWordStatus,
+		type NovelDetail,
+		type UnknownWord
+	} from '#lib/api';
+	import { BAND_HINT, RANK_LABEL, STATUS_LABEL, characters, date, percent } from '#lib/format';
 
 	let novel = $state<NovelDetail | null>(null);
 	let missing = $state(false);
@@ -23,6 +31,27 @@
 			else failed = true;
 		}
 	});
+
+	let felt = $state<'easier' | 'right' | 'harder' | null>(null);
+	let note = $state('');
+	let sent = $state(false);
+	let marked = $state<Record<number, boolean>>({});
+
+	async function reload() {
+		if (novel) novel = await getNovel(novel.id);
+	}
+
+	async function mark(word: UnknownWord, known: boolean) {
+		await setWordStatus(word.lemma_id, known);
+		marked = { ...marked, [word.lemma_id]: known };
+		await reload();
+	}
+
+	async function giveFeedback() {
+		if (!novel || !felt) return;
+		await sendFeedback(novel.id, felt, note);
+		sent = true;
+	}
 
 	const keywords = $derived(novel?.keywords?.split(/\s+/).filter(Boolean) ?? []);
 </script>
@@ -82,6 +111,57 @@
 				</li>
 			{/each}
 		</ul>
+	{/if}
+
+	{#if novel.me}
+		<section class="mt-8">
+			<h2 class="text-sm font-semibold">For you</h2>
+			<div class="mt-2 rounded-xl border border-line bg-surface p-4">
+				<BandBadge band={novel.me.band} coverage={novel.me.coverage} />
+				<p class="mt-2 text-sm text-muted first-letter:uppercase">
+					{BAND_HINT[novel.me.band]}. You are expected to know {percent(novel.me.coverage, 1)} of the
+					words in the sample, about {novel.me.unknown_distinct.toLocaleString('en')} distinct words you
+					probably don't know; {novel.me.unknown_repeating} of them repeat 5 or more times, so they are
+					worth learning first.
+				</p>
+			</div>
+			{#if novel.unknown_words.length}
+				<h3 class="mt-5 text-sm font-semibold">Words you probably don't know</h3>
+				<p class="mt-1 text-sm text-muted">
+					Most frequent first. Tell the app which ones you know and your predictions improve.
+				</p>
+				<ul class="mt-3 grid gap-2">
+					{#each novel.unknown_words as word (word.lemma_id)}
+						<li class="rounded-lg border border-line bg-surface px-3 py-2 text-sm">
+							<div class="flex flex-wrap items-baseline justify-between gap-x-3">
+								<span>
+									<span class="font-medium" lang="ja">{word.lemma}</span>
+									{#if word.reading && word.reading !== word.lemma}
+										<span class="text-muted" lang="ja"> {word.reading}</span>
+									{/if}
+									<span class="text-muted"> · {word.gloss ?? 'no gloss'}</span>
+								</span>
+								<span class="text-xs text-muted">×{word.count}</span>
+							</div>
+							<div class="mt-2 flex gap-2">
+								<button
+									type="button"
+									aria-pressed={marked[word.lemma_id] === true}
+									class="rounded-lg border border-line px-2.5 py-1 text-xs font-medium aria-pressed:border-good aria-pressed:text-good"
+									onclick={() => mark(word, true)}>I know it</button
+								>
+								<button
+									type="button"
+									aria-pressed={marked[word.lemma_id] === false}
+									class="rounded-lg border border-line px-2.5 py-1 text-xs font-medium aria-pressed:border-bad aria-pressed:text-bad"
+									onclick={() => mark(word, false)}>I don't</button
+								>
+							</div>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</section>
 	{/if}
 
 	<section class="mt-8">
@@ -165,6 +245,50 @@
 					</li>
 				{/each}
 			</ul>
+		</section>
+	{/if}
+
+	{#if novel.me}
+		<section class="mt-8">
+			<h2 class="text-sm font-semibold">How did it feel?</h2>
+			{#if sent}
+				<p class="mt-2 text-sm text-muted">
+					Thanks, saved. You can see it with the prediction on your <a
+						href="/profile/"
+						class="text-accent underline">profile</a
+					>.
+				</p>
+			{:else}
+				<p class="mt-1 text-sm text-muted">
+					After you have tried it on Syosetu: was it easier or harder than predicted? This is how we
+					check the model.
+				</p>
+				<div class="mt-3 flex flex-wrap gap-2" role="group" aria-label="How it felt">
+					{#each [['easier', 'Easier'], ['right', 'About right'], ['harder', 'Harder']] as [value, label] (value)}
+						<button
+							type="button"
+							aria-pressed={felt === value}
+							class="rounded-lg border border-line px-3 py-2 text-sm font-medium aria-pressed:border-accent aria-pressed:text-accent"
+							onclick={() => (felt = value as 'easier' | 'right' | 'harder')}>{label}</button
+						>
+					{/each}
+				</div>
+				<label class="mt-3 block text-sm">
+					<span class="text-muted">Note (optional)</span>
+					<input
+						type="text"
+						bind:value={note}
+						maxlength="500"
+						class="mt-1 w-full rounded-lg border border-line bg-bg px-3 py-2"
+					/>
+				</label>
+				<button
+					type="button"
+					disabled={!felt}
+					class="mt-3 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-accent-ink disabled:opacity-50"
+					onclick={giveFeedback}>Save</button
+				>
+			{/if}
 		</section>
 	{/if}
 

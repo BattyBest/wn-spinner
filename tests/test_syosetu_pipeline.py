@@ -196,3 +196,31 @@ async def test_a_disallowed_path_stops_the_run(collector, cache, conn, site):
     result = await pipeline.sample_all(collector, cache, conn, novels, TARGET)
     assert "robots.txt" in (result.stopped or "")
     assert site.chapters.call_count == 0
+
+
+async def test_sampling_keeps_excerpts_for_the_test(collector, cache, conn, site):
+    site.chapters.respond(200, text=fixture("chapter_long.html"))
+    await pipeline.discover(collector, conn, limit=10, today=TODAY)
+    novels = pipeline.pending_novels(conn, 200, deepen=False)
+    await pipeline.sample_all(collector, cache, conn, novels, 200)
+    rows = conn.execute("SELECT * FROM excerpt").fetchall()
+    assert rows and all(80 <= r["chars"] <= 300 for r in rows)
+    per_novel = conn.execute("SELECT COUNT(*) FROM excerpt GROUP BY novel_id").fetchall()
+    assert all(r[0] <= 3 for r in per_novel)
+    # Excerpts are stored in catalog.db only; the cached chapter pages are still deleted.
+    assert not [r for r in cache.stats() if r["kind"] == "chapter"]
+
+
+async def test_excerpts_command_fills_novels_that_have_none(collector, cache, conn, site):
+    await pipeline.discover(collector, conn, limit=10, today=TODAY)
+    novels = pipeline.pending_novels(conn, TARGET, deepen=False)
+    await pipeline.sample_all(collector, cache, conn, novels, TARGET)  # 27-character fixtures
+    assert conn.execute("SELECT COUNT(*) FROM excerpt").fetchone()[0] == 0
+
+    site.chapters.respond(200, text=fixture("chapter_long.html"))
+    missing = pipeline.novels_without_excerpts(conn)
+    assert len(missing) == 4
+    filled, pages = await pipeline.fill_excerpts(collector, cache, conn, missing)
+    assert (filled, pages) == (4, 4)
+    assert pipeline.novels_without_excerpts(conn) == []
+    assert not [r for r in cache.stats() if r["kind"] == "chapter"]

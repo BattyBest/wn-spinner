@@ -14,7 +14,15 @@ from ...analysis.store import COVER_STEPS, rare_words
 from ...collector.http import REQUEST_OUTCOMES
 from ...config import DAY, POLICIES
 from ...db import open_catalog
+from ...learner.coverage import (
+    TARGET,
+    NovelFit,
+    domain_strengths,
+    unknown_words,
+    weakest_domain,
+)
 from ...syosetu.store import source_id
+from ..personal import open_context
 
 router = APIRouter()
 
@@ -29,6 +37,18 @@ CARD_COLUMNS = (
     " n.chapter_count, n.length_chars, n.is_r15, n.points, n.url, n.last_up,"
     " s.cover_1k, s.cover_3k, s.cover_10k, s.kanji_pct, s.dialogue_pct, s.sample_chars"
 )
+
+
+def _personal(fit: NovelFit | None) -> dict | None:
+    if fit is None:
+        return None
+    return {
+        "coverage": fit.coverage,
+        "band": fit.band,
+        "unknown_distinct": fit.unknown_distinct,
+        "unknown_repeating": fit.unknown_repeating,
+        "top_domains": fit.top_domains(),
+    }
 
 
 def _card(row) -> dict:
@@ -70,7 +90,8 @@ def list_novels(
     completed: bool = False,
     hide_r15: bool = False,
     min_cover_3k: float | None = Query(None, ge=0, le=1),
-    sort: Literal["popularity", "easiest", "updated", "length"] = "popularity",
+    sort: Literal["popularity", "easiest", "updated", "length", "best"] = "popularity",
+    band: Literal["comfortable", "stretch", "hard", "too_hard"] | None = None,
     limit: int = Query(24, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> dict:
@@ -96,25 +117,98 @@ def list_novels(
         where.append("s.cover_3k >= ?")
         args.append(min_cover_3k)
 
-    conn = open_catalog(request.app.state.data_dir)
+    ctx = open_context(request)
+    conn = ctx.catalog
     try:
         args[0] = source_id(conn)
         base = " FROM novel n LEFT JOIN novel_stats s ON s.novel_id = n.id WHERE " + " AND ".join(
             where
         )
+        fits = ctx.fits() if ctx.tested else {}
+        if (sort == "best" or band) and not fits:
+            raise HTTPException(409, "take the placement test first")
+        if sort == "best" or band:
+            rows = conn.execute(
+                f"SELECT {CARD_COLUMNS}{base} ORDER BY {SORTS['popularity']}", args
+            ).fetchall()
+            ordered = _rank_for_me(ctx, rows, fits, band, best=sort == "best")
+            page = ordered[offset : offset + limit]
+            items = []
+            for row, grow in page:
+                card = _card(row)
+                card["me"] = {**_personal(fits.get(row["id"])), "grow": grow}
+                items.append(card)
+            return {"total": len(ordered), "limit": limit, "offset": offset, "items": items}
         total = conn.execute("SELECT COUNT(*)" + base, args).fetchone()[0]
         rows = conn.execute(
             f"SELECT {CARD_COLUMNS}{base} ORDER BY {SORTS[sort]} LIMIT ? OFFSET ?",
             [*args, limit, offset],
         ).fetchall()
-        return {"total": total, "limit": limit, "offset": offset, "items": [_card(r) for r in rows]}
+        items = []
+        for r in rows:
+            card = _card(r)
+            card["me"] = _personal(fits.get(r["id"]))
+            items.append(card)
+        return {"total": total, "limit": limit, "offset": offset, "items": items}
     finally:
-        conn.close()
+        ctx.close()
+
+
+GROW_EVERY = 5  # one slot in five is a "grow" pick
+POPULARITY_WEIGHT = 0.01
+COMPLETED_BONUS = 0.005
+
+
+def _rank_for_me(ctx, rows, fits, band, best: bool) -> list[tuple]:
+    """Order novels for this learner. Returns ``(row, is_grow_pick)`` pairs."""
+    rows = [r for r in rows if r["id"] in fits and (not band or fits[r["id"]].band == band)]
+    if not best:
+        return [(r, False) for r in rows]
+    if not band:
+        rows = [r for r in rows if fits[r["id"]].band != "too_hard"]
+    top = max((r["points"] or 0 for r in rows), default=0) or 1
+
+    def score(row) -> float:
+        done = COMPLETED_BONUS if row["status"] == "completed" else 0.0
+        return (
+            -abs(fits[row["id"]].coverage - TARGET)
+            + POPULARITY_WEIGHT * (row["points"] or 0) / top
+            + done
+        )
+
+    ordered = sorted(rows, key=score, reverse=True)
+    weak = weakest_domain(domain_strengths(ctx.catalog, ctx.learner))
+    if weak is None:
+        return [(r, False) for r in ordered]
+    pool = sorted(
+        (
+            r
+            for r in ordered
+            if fits[r["id"]].band == "comfortable" and fits[r["id"]].domain_unknown.get(weak, 0) > 0
+        ),
+        key=lambda r: -fits[r["id"]].domain_unknown[weak] / fits[r["id"]].tokens,
+    )
+    grown = {r["id"] for r in pool}
+    main = [r for r in ordered if r["id"] not in grown or len(pool) == 0]
+    result: list[tuple] = []
+    queue = list(pool)
+    main_iter = iter(main)
+    for position in range(len(ordered)):
+        if position % GROW_EVERY == GROW_EVERY - 1 and queue:
+            result.append((queue.pop(0), True))
+            continue
+        nxt = next(main_iter, None)
+        if nxt is None:
+            break
+        result.append((nxt, False))
+    result.extend((r, False) for r in queue)
+    return result
 
 
 @router.get("/novels/{novel_id}")
 def get_novel(novel_id: int, request: Request) -> dict:
-    conn = open_catalog(request.app.state.data_dir)
+    ctx = open_context(request)
+    conn = ctx.catalog
     try:
         row = conn.execute(
             f"SELECT {CARD_COLUMNS}, n.synopsis, n.keywords, n.first_up FROM novel n"
@@ -164,9 +258,12 @@ def get_novel(novel_id: int, request: Request) -> dict:
         detail["site_dialogue_pct"] = conn.execute(
             "SELECT site_dialogue_pct FROM novel WHERE id = ?", (novel_id,)
         ).fetchone()[0]
+        fit = ctx.fits().get(novel_id) if ctx.tested else None
+        detail["me"] = _personal(fit)
+        detail["unknown_words"] = unknown_words(conn, ctx.learner, novel_id) if fit else []
         return detail
     finally:
-        conn.close()
+        ctx.close()
 
 
 @router.post("/novels/{novel_id}/open", status_code=204)

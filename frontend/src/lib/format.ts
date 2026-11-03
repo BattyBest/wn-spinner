@@ -17,3 +17,21 @@ export const RANK_LABEL: Record<string, string> = {
 	monthly: 'Monthly',
 	quarterly: 'Quarterly'
 };
+
+export const BAND_LABEL: Record<string, string> = {
+	comfortable: 'Comfortable',
+	stretch: 'Stretch',
+	hard: 'Hard',
+	too_hard: 'Too hard'
+};
+
+/** Short guidance under each band's name. */
+export const BAND_HINT: Record<string, string> = {
+	comfortable: 'reads with almost no lookups',
+	stretch: 'about one unknown word per two lines',
+	hard: 'readable with a dictionary at hand',
+	too_hard: 'too many unknown words to enjoy'
+};
+
+export const JLPT_LABEL = (level: number | null | undefined) =>
+	level ? `about N${level}` : 'below N5';
