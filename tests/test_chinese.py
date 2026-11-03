@@ -122,6 +122,26 @@ def test_load_cedict_from_text_gz_and_zip(zh_world, tmp_path):
     assert d.status(conn, "zh")["meta"]["cedict"]["entries"] == 4
 
 
+def test_load_cedict_prefers_a_real_sense_over_pointers_and_marked_senses(zh_world, tmp_path):
+    conn = zh_world
+    for word in ("绿", "行"):
+        conn.execute("INSERT INTO lemma (language, lemma, pos) VALUES ('zh', ?, 'n')", (word,))
+    path = tmp_path / "cedict.u8"
+    path.write_text(
+        "綠 绿 [Lu:4] /surname Lü/\n"
+        "綠 绿 [lu4] /used in names/\n"
+        "綠 绿 [lu:4] /green/\n"
+        "行 行 [hang2] /(bound form) row; line/\n"
+        "行 行 [heng2] /used in 道行[dao4 heng2]/\n"
+        "行 行 [xing2] /to walk; to go/capable/\n",
+        encoding="utf-8",
+    )
+    d.load_cedict(conn, path)
+    rows = {r["lemma"]: r for r in conn.execute("SELECT lemma, gloss, reading FROM lemma")}
+    assert (rows["绿"]["gloss"], rows["绿"]["reading"]) == ("green", "lǜ")
+    assert (rows["行"]["gloss"], rows["行"]["reading"]) == ("to walk; to go; capable", "xíng")
+
+
 def test_parse_hsk_keeps_the_easiest_level_and_ignores_old_lists():
     text = json.dumps(
         [
