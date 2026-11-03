@@ -32,7 +32,7 @@ POLICIES: dict[str, HostPolicy] = {
     "api.syosetu.com": HostPolicy(daily_cap=2000, cache_ttl=DAY),
     "ncode.syosetu.com": HostPolicy(daily_cap=3000, cache_ttl=None),
     "yomou.syosetu.com": HostPolicy(daily_cap=500, cache_ttl=DAY),
-    "www.jjwxc.net": HostPolicy(daily_cap=1000, cache_ttl=DAY),
+    "www.jjwxc.net": HostPolicy(daily_cap=2000, cache_ttl=DAY),
 }
 DEFAULT_POLICY = HostPolicy(daily_cap=100, cache_ttl=DAY)
 

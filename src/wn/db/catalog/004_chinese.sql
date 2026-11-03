@@ -52,3 +52,18 @@ ALTER TABLE novel_stats ADD COLUMN idiom_rate REAL;
 ALTER TABLE novel ADD COLUMN is_mature INTEGER NOT NULL DEFAULT 0;
 -- The site's own favourites count (jjwxc); null where the source has none.
 ALTER TABLE novel ADD COLUMN favourites INTEGER;
+
+-- jjwxc has no daily or weekly list; it has half-year, new-author and all-time ones.
+CREATE TABLE ranking_new (
+    novel_id INTEGER NOT NULL REFERENCES novel (id) ON DELETE CASCADE,
+    list     TEXT NOT NULL CHECK (list IN
+                 ('daily', 'weekly', 'monthly', 'quarterly', 'halfyear', 'newcomers', 'alltime')),
+    date     TEXT NOT NULL,
+    rank     INTEGER NOT NULL,
+    points   INTEGER,
+    PRIMARY KEY (novel_id, list, date)
+);
+INSERT INTO ranking_new (novel_id, list, date, rank, points)
+    SELECT novel_id, list, date, rank, points FROM ranking;
+DROP TABLE ranking;
+ALTER TABLE ranking_new RENAME TO ranking;
