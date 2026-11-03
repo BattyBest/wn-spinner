@@ -24,6 +24,7 @@
 		}
 		try {
 			novel = await getNovel(id);
+			rows = novel.unknown_words;
 			document.title = `${novel.title} · wn-spinner`;
 			noteOpened(id);
 		} catch (error) {
@@ -35,15 +36,27 @@
 	let felt = $state<'easier' | 'right' | 'harder' | null>(null);
 	let note = $state('');
 	let sent = $state(false);
-	let marked = $state<Record<number, boolean>>({});
+	let marked = $state<Record<number, boolean | null>>({});
+	// The to-mark list is frozen while you work through it, so rows never jump under the cursor.
+	// Marked rows stay in place (dimmed, with undo) until you press "Remove marked words".
+	let rows = $state<UnknownWord[]>([]);
+	const pending = $derived(rows.filter((w) => marked[w.lemma_id] != null).length);
 
-	async function reload() {
-		if (novel) novel = await getNovel(novel.id);
+	async function reload(compact = false) {
+		if (!novel) return;
+		const fresh = await getNovel(novel.id);
+		if (compact) {
+			rows = fresh.unknown_words;
+			marked = {};
+		}
+		novel = { ...fresh, unknown_words: rows };
 	}
 
 	async function mark(word: UnknownWord, known: boolean) {
-		await setWordStatus(word.lemma_id, known);
-		marked = { ...marked, [word.lemma_id]: known };
+		// Pressing the active choice again undoes it.
+		const next = marked[word.lemma_id] === known ? null : known;
+		await setWordStatus(word.lemma_id, next);
+		marked = { ...marked, [word.lemma_id]: next };
 		await reload();
 	}
 
@@ -125,14 +138,29 @@
 					worth learning first.
 				</p>
 			</div>
-			{#if novel.unknown_words.length}
+			{#if rows.length}
 				<h3 class="mt-5 text-sm font-semibold">Words you probably don't know</h3>
 				<p class="mt-1 text-sm text-muted">
-					Most frequent first. Tell the app which ones you know and your predictions improve.
+					Most frequent first. Tell the app which ones you know and your predictions improve. Marked
+					words stay where they are, so nothing moves while you click; press the button again to
+					undo.
 				</p>
+				{#if pending}
+					<button
+						type="button"
+						class="mt-2 rounded-lg border border-line px-3 py-1.5 text-xs font-medium"
+						onclick={() => reload(true)}>Remove {pending} marked from the list</button
+					>
+				{/if}
 				<ul class="mt-3 grid gap-2">
-					{#each novel.unknown_words as word (word.lemma_id)}
-						<li class="rounded-lg border border-line bg-surface px-3 py-2 text-sm">
+					{#each rows as word (word.lemma_id)}
+						<li
+							class="rounded-lg border border-line bg-surface px-3 py-2 text-sm {marked[
+								word.lemma_id
+							] != null
+								? 'opacity-60'
+								: ''}"
+						>
 							<div class="flex flex-wrap items-baseline justify-between gap-x-3">
 								<span>
 									<span class="font-medium" lang="ja">{word.lemma}</span>

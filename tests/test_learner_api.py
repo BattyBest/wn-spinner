@@ -242,3 +242,18 @@ def test_feedback_is_stored_with_the_prediction_at_the_time(tested):
     assert 0 < entry["predicted"] < 1 and entry["novel"] == "n0000x"
     assert client.post("/api/novels/999/feedback", json={"felt": "right"}).status_code == 404
     assert client.post(f"/api/novels/{novel}/feedback", json={"felt": "meh"}).status_code == 422
+
+
+def test_marked_words_leave_the_unknown_list_either_way(tested):
+    client, ids, _ = tested
+    novel = ids["novels"][5]
+    words = client.get(f"/api/novels/{novel}").json()["unknown_words"]
+    assert len(words) >= 2
+    know, dont = words[0]["lemma_id"], words[1]["lemma_id"]
+    client.put("/api/words/status", json={"lemma_id": know, "known": True})
+    client.put("/api/words/status", json={"lemma_id": dont, "known": False})
+    after = {w["lemma_id"] for w in client.get(f"/api/novels/{novel}").json()["unknown_words"]}
+    assert know not in after and dont not in after
+    client.put("/api/words/status", json={"lemma_id": dont, "known": None})
+    back = {w["lemma_id"] for w in client.get(f"/api/novels/{novel}").json()["unknown_words"]}
+    assert dont in back

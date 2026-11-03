@@ -91,7 +91,10 @@ def novel_fits(catalog: sqlite3.Connection, learner: Learner) -> dict[int, Novel
 def unknown_words(
     catalog: sqlite3.Connection, learner: Learner, novel_id: int, limit: int = 20
 ) -> list[dict]:
-    """The most frequent words in a novel you probably don't know, with reading and gloss."""
+    """The most frequent words in a novel you probably don't know, with reading and gloss.
+
+    Words you have already marked (known or not) are left out; there is nothing to ask.
+    """
     out = []
     rows = catalog.execute(
         "SELECT nl.lemma_id, nl.count, nl.is_name, l.lemma, l.pos, l.reading, l.gloss, l.oov,"
@@ -102,6 +105,8 @@ def unknown_words(
     for row in rows:
         if is_name(row):
             continue
+        if learner.status.get(learner.lexicon.keys.get(row["lemma_id"], ("", ""))) is not None:
+            continue  # already answered: marked words leave the to-mark list either way
         p = learner.p(row["lemma_id"])
         if p < UNKNOWN_BELOW:
             out.append(
