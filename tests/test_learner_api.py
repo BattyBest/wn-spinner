@@ -257,3 +257,30 @@ def test_marked_words_leave_the_unknown_list_either_way(tested):
     client.put("/api/words/status", json={"lemma_id": dont, "known": None})
     back = {w["lemma_id"] for w in client.get(f"/api/novels/{novel}").json()["unknown_words"]}
     assert dont in back
+
+
+def test_weights_can_be_set_one_by_one(tested):
+    client, ids, root = tested
+    catalog = open_catalog(root)
+    add_easy_novels(catalog, ids)
+    catalog.close()
+    get = lambda q: client.get(f"/api/novels?limit=100&{q}").json()  # noqa: E731
+    # Fit alone matches the "best" preset's order up to the small nudges.
+    fit_only = get("w_fit=100")
+    assert fit_only["items"] and all(i["me"]["band"] != "too_hard" for i in fit_only["items"])
+    # Popularity alone orders by points, even with other weights explicitly zero.
+    pop = get("w_popularity=100&w_fit=0&w_grow=0")["items"]
+    points = [i["points"] for i in pop]
+    assert points == sorted(points, reverse=True)
+    # Length alone orders longest first.
+    lengths = [i["length_chars"] or 0 for i in get("w_length=100")["items"]]
+    assert lengths == sorted(lengths, reverse=True)
+    # An unknown weight value is rejected.
+    assert client.get("/api/novels?w_fit=101").status_code == 422
+
+
+def test_personal_weights_need_the_test(untested):
+    client, *_ = untested
+    assert client.get("/api/novels?w_fit=50").status_code == 409
+    assert client.get("/api/novels?w_grow=10").status_code == 409
+    assert client.get("/api/novels?w_popularity=50&w_length=50").status_code == 200
