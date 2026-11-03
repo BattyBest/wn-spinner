@@ -1,0 +1,4 @@
+# Only install packages that have been public for 3 days or more (the value is in
+# minutes). New releases are the riskiest, and this keeps the lockfile acceptable to
+# machines that enforce the same kind of cutoff.
+minimumReleaseAge: 4320
