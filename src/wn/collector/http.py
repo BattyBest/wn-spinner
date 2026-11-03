@@ -221,7 +221,7 @@ class Collector:
             suspended=self.is_suspended(host),
         )
 
-    async def fetch(self, url: str, *, refresh: bool = False) -> FetchResult:
+    async def fetch(self, url: str, *, refresh: bool = False, kind: str = "page") -> FetchResult:
         parts = _split(url)
         host, policy = parts.hostname, policy_for(parts.hostname)
         if not refresh:
@@ -239,7 +239,7 @@ class Collector:
             raise RobotsDisallowed(f"robots.txt on {host} disallows {path}")
         status, body = await self._network(url, "page", host, rules)
         if status == 200:
-            self._cache.put(url, "page", status, body, self._wall())
+            self._cache.put(url, kind, status, body, self._wall())
         return FetchResult(url, status, body, from_cache=False)
 
     # --- the request loop ---------------------------------------------------------

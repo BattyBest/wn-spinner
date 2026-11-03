@@ -1,0 +1,32 @@
+[
+  {"allcount": 4},
+  {
+    "title": "テスト魔王の冒険", "ncode": "N0001AA", "writer": "試験太郎",
+    "story": "魔王が旅に出る、作り話のあらすじ。", "genre": 201,
+    "keyword": "異世界 魔王 冒険", "general_firstup": "2025-01-01 12:00:00",
+    "general_lastup": "2026-10-30 08:00:00", "novel_type": 1, "end": 1,
+    "general_all_no": 120, "length": 480000, "isstop": 0, "isr15": 0,
+    "global_point": 52000, "fav_novel_cnt": 9000, "kaiwaritu": 41
+  },
+  {
+    "title": "短い話", "ncode": "N0002BB", "writer": "試験花子",
+    "story": "短編のあらすじ。", "genre": 302, "keyword": "日常",
+    "general_firstup": "2026-09-01 00:00:00", "general_lastup": "2026-09-01 00:00:00",
+    "novel_type": 2, "end": 0, "general_all_no": 1, "length": 6200,
+    "isstop": 0, "isr15": 0, "global_point": 800, "fav_novel_cnt": 90, "kaiwaritu": 20
+  },
+  {
+    "title": "完結した物語", "ncode": "N0003CC", "writer": "試験次郎",
+    "story": "完結済みのあらすじ。", "genre": 102, "keyword": "恋愛 R15",
+    "general_firstup": "2024-04-01 00:00:00", "general_lastup": "2025-04-01 00:00:00",
+    "novel_type": 1, "end": 0, "general_all_no": 40, "length": 150000,
+    "isstop": 0, "isr15": 1, "global_point": 30000, "fav_novel_cnt": 4000, "kaiwaritu": 55
+  },
+  {
+    "title": "止まった連載", "ncode": "N0004DD", "writer": "試験三郎",
+    "story": "更新が止まっている。", "genre": 9999, "keyword": "",
+    "general_firstup": "2023-01-01 00:00:00", "general_lastup": "2023-06-01 00:00:00",
+    "novel_type": 1, "end": 1, "general_all_no": 12, "length": 40000,
+    "isstop": 1, "isr15": 0, "global_point": 100, "fav_novel_cnt": 5, "kaiwaritu": 30
+  }
+]
