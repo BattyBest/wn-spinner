@@ -35,10 +35,10 @@ def world(tmp_path):
     return client, ids, glosses, ranks, weights, tmp_path
 
 
-def run_test(client, kind, glosses, ranks, weights, seed=1):
+def run_test(client, kind, glosses, ranks, weights, seed=1, lang="ja"):
     """Answer like a learner with the TRUE parameters. Returns every item that was shown."""
     rng = random.Random(seed)
-    body = client.post("/api/test/start", json={"kind": kind}).json()
+    body = client.post("/api/test/start", json={"kind": kind, "lang": lang}).json()
     session, shown = body["session"], []
     while not body["done"]:
         item = body["item"]
