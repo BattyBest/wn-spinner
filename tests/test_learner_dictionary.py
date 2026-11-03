@@ -110,7 +110,7 @@ def test_load_matches_lemmas_and_prefers_the_kanji_entry(conn, tmp_path):
     assert result["entries"] == 4
     row = lambda i: conn.execute("SELECT * FROM lemma WHERE id = ?", (i,)).fetchone()  # noqa: E731
     assert (row(react)["gloss"], row(react)["tags"]) == ("reaction, response", "chem")
-    assert row(magic)["gloss"] == "magic" and row(magic)["jmdict_id"] == 1002
+    assert row(magic)["gloss"] == "magic" and row(magic)["dict_id"] == 1002
     assert row(slang)["tags"] == "sl col"
     assert row(unknown)["gloss"] is None
     assert row(name)["gloss"] is None  # proper nouns are never glossed
@@ -145,7 +145,7 @@ def test_jlpt_file_without_header_takes_level_from_the_name(conn, tmp_path):
     (tmp_path / "n5.csv").write_text("魔法,まほう\n", encoding="utf-8")
     count = d.load_jlpt(conn, [(tmp_path / "jlpt-n4.csv", None), (tmp_path / "n5.csv", None)])
     assert count == 2
-    levels = dict(conn.execute("SELECT lemma, level FROM jlpt_word").fetchall())
+    levels = dict(conn.execute("SELECT lemma, level FROM level_word").fetchall())
     assert levels == {"反応": 4, "魔法": 5}  # a word in two lists keeps the easier level
 
 

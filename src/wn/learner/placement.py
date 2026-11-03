@@ -18,8 +18,7 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 
-from ..analysis.japanese import NAME_POS, iter_tokens
-from . import LANGUAGE
+from .. import lang as languages
 from .domains import DOMAIN_KEYS
 from .model import (
     DELTA_PRIOR_SD,
@@ -38,7 +37,6 @@ PASSAGES = {"full": 5, "quick": 0}
 FAKE_SHARE = 0.2
 GENERAL_SHARE = 0.35  # at least this share of words come from outside every domain
 MEANING_EVERY = 10  # claimed known words
-CONTENT_POS = ("名詞", "動詞", "形容詞", "形状詞", "副詞")
 MIN_NOVELS = 3  # a test word must appear in this many novels
 NEAREST = 5  # pick at random among this many words closest to a 50% chance
 PASSAGE_RANGE = (0.85, 0.97)
@@ -70,38 +68,48 @@ class Pool:
 
     words: dict[int, Candidate] = field(default_factory=dict)
     forms: set[str] = field(default_factory=set)
+    lang: str = "ja"
 
     @classmethod
-    def load(cls, catalog: sqlite3.Connection) -> Pool:
-        pool = cls()
-        marks = ",".join("?" * len(CONTENT_POS))
+    def load(cls, catalog: sqlite3.Connection, lang: str = "ja") -> Pool:
+        pool = cls(lang=lang)
+        content_pos = languages.get(lang).content_pos
+        marks = ",".join("?" * len(content_pos))
         rows = catalog.execute(
             "SELECT l.id, l.lemma, l.pos, l.reading, l.gloss, l.corpus_rank FROM lemma l"
             " WHERE l.language = ? AND l.gloss IS NOT NULL AND l.corpus_rank IS NOT NULL"
             f" AND l.is_function = 0 AND l.pos IN ({marks})"
             " AND (SELECT COUNT(*) FROM novel_lemma nl"
             "      WHERE nl.lemma_id = l.id AND nl.is_name = 0) >= ?",
-            (LANGUAGE, *CONTENT_POS, MIN_NOVELS),
+            (lang, *content_pos, MIN_NOVELS),
         )
         for r in rows:
-            if len(r["lemma"]) < 2 and not _KANJI.match(r["lemma"]):
+            # A one-character Japanese word is fine in kanji; Chinese test words have two or more.
+            if len(r["lemma"]) < 2 and (lang == "zh" or not _KANJI.match(r["lemma"])):
                 continue
             pool.words[r["id"]] = Candidate(
                 r["id"], r["lemma"], r["pos"], r["reading"], r["gloss"], r["corpus_rank"]
             )
-        pool.forms = {r[0] for r in catalog.execute("SELECT form FROM dict_form")}
+        pool.forms = {
+            r[0] for r in catalog.execute("SELECT form FROM dict_form WHERE language = ?", (lang,))
+        }
         return pool
 
 
 # --- state ---------------------------------------------------------------------------------
 
 
-def start(profile: sqlite3.Connection, kind: str = "full", now: float | None = None) -> int:
+def start(
+    profile: sqlite3.Connection,
+    kind: str = "full",
+    now: float | None = None,
+    lang: str = "ja",
+) -> int:
     """Begin a session, or return the unfinished one of the same kind."""
     row = profile.execute(
         "SELECT id FROM test_session WHERE language = ? AND kind = ? AND finished_at IS NULL"
         " ORDER BY id DESC LIMIT 1",
-        (LANGUAGE, kind),
+        (lang, kind),
     ).fetchone()
     if row:
         return row[0]
@@ -126,7 +134,7 @@ def start(profile: sqlite3.Connection, kind: str = "full", now: float | None = N
     with profile:
         cursor = profile.execute(
             "INSERT INTO test_session (language, kind, state, started_at) VALUES (?, ?, ?, ?)",
-            (LANGUAGE, kind, json.dumps(state), time.time() if now is None else now),
+            (lang, kind, json.dumps(state), time.time() if now is None else now),
         )
     return cursor.lastrowid
 
@@ -165,7 +173,7 @@ def progress(state: dict) -> dict:
 
 
 def _learner(profile: sqlite3.Connection, lexicon: Lexicon) -> Learner:
-    return Learner(load_params(profile), lexicon, load_status(profile))
+    return Learner(load_params(profile, lexicon.lang), lexicon, load_status(profile, lexicon.lang))
 
 
 def _asked_ids(state: dict) -> set[int]:
@@ -224,10 +232,13 @@ def choose_word(state: dict, learner: Learner, pool: Pool, rng: random.Random) -
 
 
 def make_fake(pool: Pool, rng: random.Random) -> dict:
-    """A plausible non-word: two real two-kanji words recombined, or a katakana word changed."""
+    """A plausible non-word: two real two-character words recombined (Japanese kanji or Chinese
+    hanzi), or, in Japanese, a katakana word with one mora changed."""
     kanji = [c.lemma for c in pool.words.values() if len(c.lemma) == 2 and _KANJI.match(c.lemma)]
     kata = [
-        c.lemma for c in pool.words.values() if 4 <= len(c.lemma) <= 7 and _KATAKANA.match(c.lemma)
+        c.lemma
+        for c in pool.words.values()
+        if pool.lang == "ja" and 4 <= len(c.lemma) <= 7 and _KATAKANA.match(c.lemma)
     ]
     for _ in range(200):
         if kanji and (not kata or rng.random() < 0.6):
@@ -243,11 +254,12 @@ def make_fake(pool: Pool, rng: random.Random) -> dict:
             break
         if text in pool.forms or any(c.lemma == text for c in pool.words.values()):
             continue
-        tokens = [w for _s, w in iter_tokens(text) if w is not None]
+        tokens = [w for _s, w in languages.iter_tokens(pool.lang, text) if w is not None]
         if len(tokens) == 1 and not tokens[0].oov and tokens[0].lemma == text:
             continue  # the tokenizer knows it as one word
         return {"type": "fake", "text": text}
-    raise PlacementError("could not make a test word; is JMdict loaded?")
+    dictionary = languages.get(pool.lang).dictionary
+    raise PlacementError(f"could not make a test word; is {dictionary} loaded?")
 
 
 def make_meaning(pool: Pool, asked_word: dict, rng: random.Random) -> dict:
@@ -278,18 +290,20 @@ def make_meaning(pool: Pool, asked_word: dict, rng: random.Random) -> dict:
 
 
 def _content_tokens(tokens: list[list], lexicon: Lexicon) -> list[int]:
+    name_pos = languages.get(lexicon.lang).name_pos
     return [
         i
         for i, (_surface, lemma_id, pos) in enumerate(tokens)
         if lemma_id is not None
-        and pos != NAME_POS
+        and pos != name_pos
         and lemma_id not in lexicon.function
         and lemma_id not in lexicon.names
     ]
 
 
 def passage_coverage(tokens: list[list], learner: Learner) -> float | None:
-    counted = [learner.p(t[1]) for t in tokens if t[1] is not None and t[2] != NAME_POS]
+    name_pos = languages.get(learner.lexicon.lang).name_pos
+    counted = [learner.p(t[1]) for t in tokens if t[1] is not None and t[2] != name_pos]
     return sum(counted) / len(counted) if counted else None
 
 
@@ -302,7 +316,12 @@ def choose_passage(
     unsure = max(DOMAIN_KEYS, key=lambda k: params.delta_sds[k])
     best: list[tuple[float, dict]] = []
     for low, high in (PASSAGE_RANGE, PASSAGE_WIDE):
-        for row in catalog.execute("SELECT id, novel_id, text, tokens FROM excerpt"):
+        for row in catalog.execute(
+            "SELECT e.id, e.novel_id, e.text, e.tokens FROM excerpt e"
+            " JOIN novel n ON n.id = e.novel_id JOIN source s ON s.id = n.source_id"
+            " WHERE s.language = ?",
+            (lex.lang,),
+        ):
             if row["id"] in state["used_excerpts"] or row["novel_id"] in state["used_novels"]:
                 continue
             tokens = json.loads(row["tokens"])
@@ -334,10 +353,11 @@ def choose_passage(
 
 
 def _make_cloze(tokens: list[list], pool: Pool, rng: random.Random) -> dict | None:
+    noun = languages.get(pool.lang).content_pos[0]
     spots = [
         i
         for i, (surface, lemma_id, pos) in enumerate(tokens)
-        if lemma_id in pool.words and pos == "名詞" and pool.words[lemma_id].lemma == surface
+        if lemma_id in pool.words and pos == noun and pool.words[lemma_id].lemma == surface
     ]
     rng.shuffle(spots)
     for index in spots:
@@ -345,7 +365,7 @@ def _make_cloze(tokens: list[list], pool: Pool, rng: random.Random) -> dict | No
         near = [
             c
             for c in pool.words.values()
-            if c.pos == "名詞"
+            if c.pos == noun
             and c.lemma != target.lemma
             and target.rank / 3 <= c.rank <= target.rank * 3
         ]
@@ -414,11 +434,11 @@ def _advance(profile, catalog, session_id, state, lexicon, pool) -> None:
     _save(profile, session_id, state, finished)
 
 
-def _record(profile, session_id, kind, lemma, pos, known, weight, now) -> None:
+def _record(profile, session_id, lang, kind, lemma, pos, known, weight, now) -> None:
     profile.execute(
         "INSERT INTO answer (session_id, language, kind, lemma, pos, known, weight, at)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (session_id, LANGUAGE, kind, lemma, pos, int(known), weight, now),
+        (session_id, lang, kind, lemma, pos, int(known), weight, now),
     )
 
 
@@ -443,9 +463,19 @@ def answer(
         if kind in ("word", "fake"):
             known = bool(payload.get("known"))
             if kind == "fake":
-                _record(profile, session_id, "fake", None, None, known, 1.0, now)
+                _record(profile, session_id, lexicon.lang, "fake", None, None, known, 1.0, now)
             else:
-                _record(profile, session_id, "word", item["lemma"], item["pos"], known, 1.0, now)
+                _record(
+                    profile,
+                    session_id,
+                    lexicon.lang,
+                    "word",
+                    item["lemma"],
+                    item["pos"],
+                    known,
+                    1.0,
+                    now,
+                )
                 if known:
                     state["claims"] += 1
                     if state["claims"] % MEANING_EVERY == 0:
@@ -454,12 +484,22 @@ def answer(
         elif kind == "meaning":
             choice = payload.get("choice")
             right = choice == item["correct"]
-            _record(profile, session_id, "meaning", item["lemma"], item["pos"], right, 2.0, now)
+            _record(
+                profile,
+                session_id,
+                lexicon.lang,
+                "meaning",
+                item["lemma"],
+                item["pos"],
+                right,
+                2.0,
+                now,
+            )
             if not right:
                 profile.execute(
                     "INSERT OR REPLACE INTO word_status (language, lemma, pos, known, at)"
                     " VALUES (?, ?, ?, 0, ?)",
-                    (LANGUAGE, item["lemma"], item["pos"], now),
+                    (lexicon.lang, item["lemma"], item["pos"], now),
                 )
         elif kind == "passage":
             _record_passage(profile, session_id, item, payload, lexicon, now)
@@ -490,9 +530,9 @@ def _record_passage(profile, session_id, item, payload, lexicon, now) -> None:
         seen.add(lemma_id)
         lemma, lpos = lexicon.keys[lemma_id]
         if index in tapped:
-            _record(profile, session_id, "tap", lemma, lpos, False, 1.0, now)
+            _record(profile, session_id, lexicon.lang, "tap", lemma, lpos, False, 1.0, now)
         else:
-            _record(profile, session_id, "untapped", lemma, lpos, True, 0.3, now)
+            _record(profile, session_id, lexicon.lang, "untapped", lemma, lpos, True, 0.3, now)
     rating = payload.get("rating")
     if rating not in ("almost_all", "most", "gist", "lost"):
         raise PlacementError("rating must be almost_all, most, gist or lost")
@@ -502,7 +542,7 @@ def _record_passage(profile, session_id, item, payload, lexicon, now) -> None:
         cloze_ok = payload["cloze_choice"] == cloze["correct"]
         lemma_id = item["tokens"][cloze["index"]][1]
         lemma, lpos = lexicon.keys[lemma_id]
-        _record(profile, session_id, "meaning", lemma, lpos, cloze_ok, 2.0, now)
+        _record(profile, session_id, lexicon.lang, "meaning", lemma, lpos, cloze_ok, 2.0, now)
     profile.execute(
         "INSERT INTO passage_result (session_id, excerpt_id, predicted, rating, cloze_ok, at)"
         " VALUES (?, ?, ?, ?, ?, ?)",
@@ -510,5 +550,7 @@ def _record_passage(profile, session_id, item, payload, lexicon, now) -> None:
     )
 
 
-def lexicon_for(profile: sqlite3.Connection, catalog: sqlite3.Connection) -> Lexicon:
-    return Lexicon.load(catalog, load_fixes(profile))
+def lexicon_for(
+    profile: sqlite3.Connection, catalog: sqlite3.Connection, lang: str = "ja"
+) -> Lexicon:
+    return Lexicon.load(catalog, load_fixes(profile, lang), lang)

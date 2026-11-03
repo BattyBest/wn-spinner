@@ -23,6 +23,7 @@ class Context:
     catalog: sqlite3.Connection
     learner: Learner
     request: Request
+    lang: str = "ja"
 
     def close(self) -> None:
         self.profile.close()
@@ -33,19 +34,23 @@ class Context:
         return self.learner.params.answers > 0
 
     def pool(self) -> Pool:
-        key = ("pool", _catalog_stamp(self.catalog))
-        return _cached(self.request, key, lambda: Pool.load(self.catalog))
+        key = (f"pool:{self.lang}", _catalog_stamp(self.catalog))
+        return _cached(self.request, key, lambda: Pool.load(self.catalog, self.lang))
 
     def fits(self) -> dict[int, NovelFit]:
         """Predicted coverage for every analysed novel, cached until the model changes."""
-        row = self.profile.execute("SELECT fitted_at FROM model WHERE language = 'ja'").fetchone()
-        status = self.profile.execute("SELECT COUNT(*), MAX(at) FROM word_status").fetchone()
+        row = self.profile.execute(
+            "SELECT fitted_at FROM model WHERE language = ?", (self.lang,)
+        ).fetchone()
+        status = self.profile.execute(
+            "SELECT COUNT(*), MAX(at) FROM word_status WHERE language = ?", (self.lang,)
+        ).fetchone()
         key = (
-            "fits",
+            f"fits:{self.lang}",
             _catalog_stamp(self.catalog),
             row[0] if row else None,
             tuple(status),
-            _fixes_stamp(self.profile),
+            _fixes_stamp(self.profile, self.lang),
         )
         return _cached(self.request, key, lambda: novel_fits(self.catalog, self.learner))
 
@@ -61,9 +66,9 @@ def _catalog_stamp(catalog: sqlite3.Connection) -> tuple:
     return tuple(row)
 
 
-def _fixes_stamp(profile: sqlite3.Connection) -> tuple:
+def _fixes_stamp(profile: sqlite3.Connection, lang: str) -> tuple:
     row = profile.execute(
-        "SELECT COUNT(*), SUM(action = 'add') FROM domain_fix WHERE language = 'ja'"
+        "SELECT COUNT(*), SUM(action = 'add') FROM domain_fix WHERE language = ?", (lang,)
     ).fetchone()
     return tuple(row)
 
@@ -79,11 +84,13 @@ def _cached(request: Request, key: tuple, build):
     return value
 
 
-def open_context(request: Request) -> Context:
+def open_context(request: Request, lang: str = "ja") -> Context:
     root = request.app.state.data_dir
     catalog = open_catalog(root)
     profile = open_profile(root)
-    key = ("lexicon", _catalog_stamp(catalog), _fixes_stamp(profile))
-    lexicon: Lexicon = _cached(request, key, lambda: Lexicon.load(catalog, load_fixes(profile)))
-    learner = Learner(load_params(profile), lexicon, load_status(profile))
-    return Context(profile, catalog, learner, request)
+    key = (f"lexicon:{lang}", _catalog_stamp(catalog), _fixes_stamp(profile, lang))
+    lexicon: Lexicon = _cached(
+        request, key, lambda: Lexicon.load(catalog, load_fixes(profile, lang), lang)
+    )
+    learner = Learner(load_params(profile, lang), lexicon, load_status(profile, lang))
+    return Context(profile, catalog, learner, request, lang)

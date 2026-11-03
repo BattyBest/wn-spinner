@@ -7,21 +7,28 @@ daily caps and the circuit breaker apply as for any other fetch. State lives in
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import math
 import sqlite3
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 from ..analysis.japanese import analyse_text
 from ..analysis.store import compute_stats, rebuild_all, sampled_chapters, save_sample
 from ..collector import Cache, Collector
-from ..collector.http import CollectorError, FetchFailed
+from ..collector.http import FetchFailed
 from ..config import DEFAULT_DELAY, MAX_CONNECTIONS
-from ..learner.excerpts import PER_NOVEL, save_excerpts
+from ..learner.excerpts import save_excerpts
+from ..sampling import (
+    Estimate,
+    Progress,
+    RunResult,
+    quiet,
+    run_sampling,
+)
+from ..sampling import fill_excerpts as sampling_fill_excerpts
+from ..sampling import novels_without_excerpts as sampling_novels_without_excerpts
 from .api import (
     NOVEL_BATCH,
     RANK_LISTS,
@@ -34,18 +41,13 @@ from .api import (
     rank_dates,
     rank_url,
 )
-from .chapter import MAX_PAGES, ParseError, chapter_url, next_chapter, parse_chapter
+from .chapter import MAX_PAGES, chapter_url, next_chapter, parse_chapter
 from .store import novel_id, save_ranking, source_id, upsert_novel
 
 CHAPTER_HOST = "ncode.syosetu.com"
 GUESS_CHAPTER_CHARS = 4000  # when the API gave no length, assume this per chapter
-PARSE_FAILURES_BEFORE_STOP = 3
 
-Progress = Callable[[str], None]
-
-
-def _quiet(_: str) -> None:
-    pass
+_quiet = quiet
 
 
 @dataclass
@@ -69,14 +71,6 @@ class Pending:
             average = max(500, self.length_chars // self.chapter_count)
         left = (self.chapter_count or 1) - len(self.have)
         return max(0, min(math.ceil(missing / average), MAX_PAGES - len(self.have), left))
-
-
-@dataclass
-class Estimate:
-    novels: int
-    pages: int
-    seconds: float
-    requests_left: int
 
 
 def pending_novels(
@@ -221,14 +215,6 @@ async def sample_novel(
     return pages
 
 
-@dataclass
-class RunResult:
-    novels_done: int = 0
-    pages: int = 0
-    skipped: int = 0
-    stopped: str | None = None
-
-
 async def sample_all(
     collector: Collector,
     cache: Cache,
@@ -238,66 +224,20 @@ async def sample_all(
     progress: Progress = _quiet,
     workers: int = MAX_CONNECTIONS,
 ) -> RunResult:
-    """Sample the novels, up to ``workers`` at a time. Stops cleanly when the host says stop.
-
-    Workers overlap their waits for responses, but the collector still starts requests no
-    closer together than the host's delay. Resume later by running the same command.
-    """
-    result = RunResult()
-    parse_failures = 0
-    started = time.monotonic()
-    queue = iter(novels)
-
-    async def worker() -> None:
-        nonlocal parse_failures
-        for novel in queue:
-            if result.stopped:
-                return
-            try:
-                result.pages += await sample_novel(collector, cache, conn, novel, target)
-            except ParseError as exc:
-                parse_failures += 1
-                result.skipped += 1
-                progress(f"{novel.ncode}: skipped ({exc})")
-                if parse_failures >= PARSE_FAILURES_BEFORE_STOP:
-                    result.stopped = (
-                        "chapter pages no longer parse; the site layout may have changed"
-                    )
-                    return
-                continue
-            except FetchFailed as exc:
-                result.skipped += 1
-                progress(f"{novel.ncode}: skipped ({exc})")
-                continue
-            except CollectorError as exc:  # robots disallow, suspended host, daily cap
-                result.stopped = result.stopped or str(exc)
-                return
-            parse_failures = 0
-            result.novels_done += 1
-            progress(
-                f"[{result.novels_done + result.skipped}/{len(novels)}] {novel.ncode}: "
-                f"{sum(novel.have.values())} chars from {len(novel.have)} chapters "
-                f"({time.monotonic() - started:.0f} s elapsed)"
-            )
-
-    async with asyncio.TaskGroup() as group:
-        for _ in range(max(1, min(workers, len(novels)))):
-            group.create_task(worker())
-    return result
+    """Sample the novels, up to ``workers`` at a time. Stops cleanly when the host says stop."""
+    return await run_sampling(
+        novels,
+        lambda novel: sample_novel(collector, cache, conn, novel, target),
+        progress,
+        workers,
+    )
 
 
 def novels_without_excerpts(
     conn: sqlite3.Connection, limit: int | None = None
 ) -> list[sqlite3.Row]:
     """Sampled novels that have no test excerpts yet, opened ones first, then popular."""
-    rows = conn.execute(
-        "SELECT n.id, n.external_id, n.kind, MIN(s.chapter_no) AS chapter_no FROM novel n"
-        " JOIN sample s ON s.novel_id = n.id"
-        " WHERE n.source_id = ? AND NOT EXISTS (SELECT 1 FROM excerpt e WHERE e.novel_id = n.id)"
-        " GROUP BY n.id ORDER BY n.opened_at IS NULL, n.opened_at DESC, n.points DESC, n.id",
-        (source_id(conn),),
-    ).fetchall()
-    return rows[:limit] if limit else rows
+    return sampling_novels_without_excerpts(conn, source_id(conn), limit)
 
 
 async def fill_excerpts(
@@ -307,35 +247,21 @@ async def fill_excerpts(
     novels: list[sqlite3.Row],
     progress: Progress = _quiet,
 ) -> tuple[int, int]:
-    """Fetch one chapter per novel and keep up to PER_NOVEL excerpts from it.
-
-    Returns ``(novels filled, pages fetched)``. Stops quietly when the host says stop.
-    """
-    filled = pages = 0
-    for index, novel in enumerate(novels, start=1):
-        url = chapter_url(novel["external_id"], novel["chapter_no"], novel["kind"] or "serial")
-        try:
-            result = await collector.fetch(url, kind="chapter")
-            pages += 1
-            if result.status != 200:
-                continue
-            text = parse_chapter(result.body).text
-            cache.delete(url)
-            if save_excerpts(conn, novel["id"], novel["chapter_no"], text, want=PER_NOVEL):
-                filled += 1
-        except (ParseError, FetchFailed) as exc:
-            progress(f"{novel['external_id']}: skipped ({exc})")
-        except CollectorError as exc:
-            progress(f"stopped: {exc}")
-            break
-        if index % 20 == 0:
-            progress(f"excerpts: {index} of {len(novels)} novels")
-    return filled, pages
+    """Fetch one chapter per novel and keep up to PER_NOVEL excerpts from it."""
+    return await sampling_fill_excerpts(
+        collector,
+        cache,
+        conn,
+        novels,
+        lambda n: chapter_url(n["external_id"], n["chapter_no"], n["kind"] or "serial"),
+        lambda body: parse_chapter(body).text,
+        progress,
+    )
 
 
 def finish(conn: sqlite3.Connection) -> tuple[int, int]:
     """Recompute frequency ranks and every novel's statistics."""
-    return rebuild_all(conn)
+    return rebuild_all(conn, "ja")
 
 
 def mark_opened(conn: sqlite3.Connection, ncode: str, now: float | None = None) -> None:

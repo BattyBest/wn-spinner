@@ -14,6 +14,7 @@ from .collector.http import CollectorError
 from .collector.session import open_session
 from .config import DEFAULT_DELAY, POLICIES, ROBOTS_TOKEN, data_dir, policy_for
 from .db import open_catalog
+from .jjwxc.cli import app as jjwxc_app
 from .learner.cli import app as dict_app
 from .syosetu.cli import app as syosetu_app
 
@@ -21,6 +22,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, help="wn-spinner c
 cache_app = typer.Typer(no_args_is_help=True, help="Inspect or clear the page cache.")
 app.add_typer(cache_app, name="cache")
 app.add_typer(syosetu_app, name="syosetu")
+app.add_typer(jjwxc_app, name="jjwxc")
 app.add_typer(dict_app, name="dict")
 
 
@@ -143,23 +145,30 @@ def analyse(
     domains: bool = typer.Option(
         False, "--domains", help="Also recompute every word's domain weights."
     ),
+    lang: str = typer.Option(None, "--lang", help="Only this language: ja or zh (default both)."),
 ) -> None:
     """Recompute word-frequency ranks and every novel's statistics from stored counts."""
+    from . import lang as languages
     from .analysis.store import rebuild_all
     from .learner.domains import rebuild_domains
 
+    if lang is not None and lang not in languages.CODES:
+        raise _fail(f"--lang must be one of: {', '.join(languages.CODES)}")
     conn = open_catalog(data_dir())
     try:
-        ranked, scored = rebuild_all(conn)
-        typer.echo(f"ranked {ranked} words; recomputed statistics for {scored} novels")
-        if domains:
-            report = rebuild_domains(conn)
-            typer.echo(
-                f"domains: {report.dictionary} dictionary tags, {report.learned} learned weights"
-            )
-            for key, members in report.groups.items():
-                note = "  (too few novels, skipped)" if key in report.skipped else ""
-                typer.echo(f"  {key:<9} {members:>4} novels{note}")
+        for code in [lang] if lang else languages.CODES:
+            ranked, scored = rebuild_all(conn, code)
+            label = languages.get(code).name
+            typer.echo(f"{label}: ranked {ranked} words; recomputed statistics for {scored} novels")
+            if domains:
+                report = rebuild_domains(conn, code)
+                typer.echo(
+                    f"{label} domains: {report.dictionary} dictionary tags, "
+                    f"{report.learned} learned weights"
+                )
+                for key, members in report.groups.items():
+                    note = "  (too few novels, skipped)" if key in report.skipped else ""
+                    typer.echo(f"  {key:<9} {members:>4} novels{note}")
     finally:
         conn.close()
 

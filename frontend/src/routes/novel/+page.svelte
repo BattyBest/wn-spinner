@@ -11,10 +11,12 @@
 		type UnknownWord
 	} from '#lib/api';
 	import { BAND_HINT, RANK_LABEL, STATUS_LABEL, characters, date, percent } from '#lib/format';
+	import { LANGS } from '#lib/lang';
 
 	let novel = $state<NovelDetail | null>(null);
 	let missing = $state(false);
 	let failed = $state(false);
+	const L = $derived(LANGS[novel?.language ?? 'ja']);
 
 	onMount(async () => {
 		const id = Number(new URLSearchParams(window.location.search).get('id'));
@@ -98,6 +100,10 @@
 		{#if novel.status}<span>{STATUS_LABEL[novel.status]}</span>{/if}
 		<span>Updated {date(novel.last_up)}</span>
 		{#if novel.is_r15}<span class="rounded bg-line px-1.5 font-medium text-ink">R15</span>{/if}
+		{#if novel.is_mature}<span class="rounded bg-line px-1.5 font-medium text-ink">Mature</span
+			>{/if}
+		{#if novel.favourites}<span>{novel.favourites.toLocaleString('en')} favourites</span>{/if}
+		{#if novel.points}<span>{novel.points.toLocaleString('en')} points</span>{/if}
 	</p>
 
 	<a
@@ -106,7 +112,7 @@
 		rel="noopener noreferrer"
 		class="mt-5 inline-block rounded-lg bg-accent px-4 py-2.5 text-sm font-semibold text-accent-ink"
 	>
-		Read on Syosetu ↗
+		Read on {L.site} ↗
 	</a>
 
 	{#if novel.synopsis}
@@ -163,9 +169,9 @@
 						>
 							<div class="flex flex-wrap items-baseline justify-between gap-x-3">
 								<span>
-									<span class="font-medium" lang="ja">{word.lemma}</span>
+									<span class="font-medium" lang={L.htmlLang}>{word.lemma}</span>
 									{#if word.reading && word.reading !== word.lemma}
-										<span class="text-muted" lang="ja"> {word.reading}</span>
+										<span class="text-muted" lang={L.htmlLang}> {word.reading}</span>
 									{/if}
 									<span class="text-muted"> · {word.gloss ?? 'no gloss'}</span>
 								</span>
@@ -230,24 +236,31 @@
 					</dd>
 				</div>
 				<div class="rounded-xl border border-line bg-surface p-3">
-					<dt class="text-muted">Kanji</dt>
-					<dd class="text-lg font-semibold">{percent(novel.stats.kanji_pct)}</dd>
+					{#if novel.stats.kanji_pct !== null}
+						<dt class="text-muted">Kanji</dt>
+						<dd class="text-lg font-semibold">{percent(novel.stats.kanji_pct)}</dd>
+					{:else}
+						<dt class="text-muted">Idioms (chengyu)</dt>
+						<dd class="text-lg font-semibold">{percent(novel.stats.idiom_rate, 1)}</dd>
+					{/if}
 				</div>
 				<div class="rounded-xl border border-line bg-surface p-3">
 					<dt class="text-muted">Dialogue (sample)</dt>
 					<dd class="text-lg font-semibold">{percent(novel.stats.dialogue_pct)}</dd>
 				</div>
-				<div class="rounded-xl border border-line bg-surface p-3">
-					<dt class="text-muted">Dialogue (Syosetu)</dt>
-					<dd class="text-lg font-semibold">
-						{novel.site_dialogue_pct === null ? '–' : `${novel.site_dialogue_pct}%`}
-					</dd>
-				</div>
+				{#if novel.language !== 'zh'}
+					<div class="rounded-xl border border-line bg-surface p-3">
+						<dt class="text-muted">Dialogue (Syosetu)</dt>
+						<dd class="text-lg font-semibold">
+							{novel.site_dialogue_pct === null ? '–' : `${novel.site_dialogue_pct}%`}
+						</dd>
+					</div>
+				{/if}
 			</dl>
 		{:else}
 			<p class="mt-2 text-sm text-muted">
-				Not analysed yet. Run <code class="font-mono">uv run wn syosetu sample</code> to read this novel's
-				opening chapters.
+				Not analysed yet. Run <code class="font-mono">uv run wn {L.command} sample</code> to read this
+				novel's opening chapters.
 			</p>
 		{/if}
 	</section>
@@ -288,8 +301,8 @@
 				</p>
 			{:else}
 				<p class="mt-1 text-sm text-muted">
-					After you have tried it on Syosetu: was it easier or harder than predicted? This is how we
-					check the model.
+					After you have tried it on {L.site}: was it easier or harder than predicted? This is how
+					we check the model.
 				</p>
 				<div class="mt-3 flex flex-wrap gap-2" role="group" aria-label="How it felt">
 					{#each [['easier', 'Easier'], ['right', 'About right'], ['harder', 'Harder']] as [value, label] (value)}
@@ -322,7 +335,7 @@
 
 	{#if novel.rankings.length}
 		<section class="mt-8">
-			<h2 class="text-sm font-semibold">On the Syosetu rankings</h2>
+			<h2 class="text-sm font-semibold">On the {L.site} rankings</h2>
 			<ul class="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-sm text-muted">
 				{#each novel.rankings as r (r.list)}
 					<li>

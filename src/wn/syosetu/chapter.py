@@ -7,14 +7,12 @@ from dataclasses import dataclass
 
 from selectolax.lexbor import LexborHTMLParser
 
+from ..sampling import ParseError  # noqa: F401  (re-exported: chapter parsers raise it)
+
 # Character targets for the two passes (see the milestone 2 plan).
 FIRST_PASS_CHARS = 10_000
 DEEP_PASS_CHARS = 20_000
 MAX_PAGES = 12  # a safety stop per novel and run, whatever the chapters' lengths
-
-
-class ParseError(Exception):
-    """The page has no chapter body we recognise. Fail loudly rather than return nothing."""
 
 
 def chapter_url(ncode: str, number: int, kind: str) -> str:

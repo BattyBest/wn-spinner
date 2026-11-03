@@ -19,7 +19,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from ..analysis.store import is_name
-from . import LANGUAGE
 
 DOMAIN_KEYS = (
     "fantasy",
@@ -83,7 +82,7 @@ class Group:
 
 
 # Genre names are the ones stored in novel.genre (see syosetu/api.py).
-GROUPS: dict[str, Group] = {
+GROUPS_JA: dict[str, Group] = {
     "fantasy": Group(
         ("ハイファンタジー〔ファンタジー〕", "ローファンタジー〔ファンタジー〕"),
         ("魔法", "魔王", "異世界", "剣と魔法", "魔物", "エルフ"),
@@ -104,6 +103,25 @@ GROUPS: dict[str, Group] = {
     "money": Group((), ("商人", "経営", "経済", "商会", "領地経営", "金融")),
     "formal": Group(("歴史〔文芸〕",), ("時代小説", "戦国", "江戸", "武士")),
 }
+
+# jjwxc has no genre list of its own: ``genre`` holds the era and type from the type line
+# (such as 古色古香-爱情) and ``keywords`` holds the content tags and the type line, so words
+# match as substrings. These groups are a first guess, to be tuned against real catalogs.
+GROUPS_ZH: dict[str, Group] = {
+    "fantasy": Group((), ("仙侠", "修真", "玄幻", "奇幻", "魔法", "神话", "灵异神怪", "神仙")),
+    "games": Group((), ("游戏", "网游", "系统", "无限流", "电竞", "副本")),
+    "court": Group((), ("宫廷", "侯爵", "宫斗", "宅斗", "权谋", "朝堂", "世家", "架空历史")),
+    "combat": Group((), ("武侠", "江湖", "战争", "军旅", "格斗", "热血")),
+    "romance": Group((), ("爱情", "甜文", "虐恋", "破镜重圆", "青梅竹马", "天作之合")),
+    "school": Group((), ("校园", "青春", "学生", "高中", "大学")),
+    "speech": Group((), ("轻松", "日常", "沙雕", "欢喜冤家", "娱乐圈", "都市")),
+    "crime": Group((), ("悬疑", "推理", "刑侦", "探案", "犯罪", "律师", "法医")),
+    "medicine": Group((), ("医生", "医术", "医疗", "医学")),
+    "science": Group((), ("科幻", "星际", "科技", "机甲", "末世")),
+    "money": Group((), ("商战", "职场", "商业", "经商", "种田", "创业", "金融")),
+    "formal": Group((), ("历史", "古色古香", "民国", "古代")),
+}
+GROUPS: dict[str, dict[str, Group]] = {"ja": GROUPS_JA, "zh": GROUPS_ZH}
 
 MIN_GROUP_NOVELS = 3
 MIN_NOVELS_WITH_WORD = 3
@@ -147,28 +165,33 @@ def _z_score(y_g: int, n_g: int, y_r: int, n_r: int, prior: float) -> float:
     return delta / math.sqrt(variance)
 
 
-def rebuild_domains(conn: sqlite3.Connection) -> DomainReport:
-    """Recompute every word's domain weights from dictionary tags and the catalog."""
+def rebuild_domains(conn: sqlite3.Connection, lang: str = "ja") -> DomainReport:
+    """Recompute one language's word domain weights from dictionary tags and the catalog."""
     report = DomainReport()
     rows: dict[tuple[int, str], tuple[float, str]] = {}
 
-    for row in conn.execute("SELECT id, tags FROM lemma WHERE tags IS NOT NULL AND tags != ''"):
+    for row in conn.execute(
+        "SELECT id, tags FROM lemma WHERE tags IS NOT NULL AND tags != '' AND language = ?",
+        (lang,),
+    ):
         for domain in tag_domains(row["tags"]):
             rows[(row["id"], domain)] = (1.0, "dictionary")
     report.dictionary = len(rows)
 
     novels = conn.execute(
         "SELECT n.id, n.genre, n.keywords FROM novel n"
-        " WHERE n.id IN (SELECT novel_id FROM novel_stats)"
+        " JOIN source s ON s.id = n.source_id"
+        " WHERE s.language = ? AND n.id IN (SELECT novel_id FROM novel_stats)",
+        (lang,),
     ).fetchall()
     usable = {r["id"] for r in novels}
     per_novel: dict[int, dict[int, int]] = defaultdict(dict)
     for row in conn.execute(
         "SELECT nl.novel_id, nl.lemma_id, nl.count, nl.is_name, l.lemma, l.oov, l.is_function"
         " FROM novel_lemma nl JOIN lemma l ON l.id = nl.lemma_id WHERE l.language = ?",
-        (LANGUAGE,),
+        (lang,),
     ):
-        if row["novel_id"] in usable and not row["is_function"] and not is_name(row):
+        if row["novel_id"] in usable and not row["is_function"] and not is_name(row, lang):
             per_novel[row["novel_id"]][row["lemma_id"]] = row["count"]
     totals = {nid: sum(c.values()) for nid, c in per_novel.items()}
     overall: dict[int, int] = defaultdict(int)
@@ -177,7 +200,7 @@ def rebuild_domains(conn: sqlite3.Connection) -> DomainReport:
             overall[lemma_id] += n
     grand = sum(overall.values()) or 1
 
-    for key, group in GROUPS.items():
+    for key, group in GROUPS[lang].items():
         members = {r["id"] for r in novels if novel_in_group(group, r["genre"], r["keywords"])}
         members &= per_novel.keys()
         rest = per_novel.keys() - members
@@ -206,7 +229,10 @@ def rebuild_domains(conn: sqlite3.Connection) -> DomainReport:
                 report.learned += 1
 
     with conn:
-        conn.execute("DELETE FROM lemma_domain")
+        conn.execute(
+            "DELETE FROM lemma_domain WHERE lemma_id IN (SELECT id FROM lemma WHERE language = ?)",
+            (lang,),
+        )
         conn.executemany(
             "INSERT INTO lemma_domain (lemma_id, domain, weight, source) VALUES (?, ?, ?, ?)",
             [(lid, d, w, s) for (lid, d), (w, s) in rows.items()],
@@ -216,5 +242,6 @@ def rebuild_domains(conn: sqlite3.Connection) -> DomainReport:
 
 def domain_names(conn: sqlite3.Connection) -> list[dict]:
     return [
-        dict(r) for r in conn.execute("SELECT key, name_en, name_ja FROM domain ORDER BY position")
+        dict(r)
+        for r in conn.execute("SELECT key, name_en, name_ja, name_zh FROM domain ORDER BY position")
     ]

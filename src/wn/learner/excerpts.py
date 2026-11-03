@@ -9,39 +9,38 @@ reader's own use as a test item, like a quoted line in a review.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 
-from ..analysis.japanese import NAME_POS, iter_tokens, normalise
-from . import LANGUAGE
+from .. import lang as languages
+from ..analysis.store import novel_language
 
-MIN_CHARS = 80
-MAX_CHARS = 300
+# Characters per excerpt. Chinese packs more into a character, so its windows are shorter.
+LIMITS = {"ja": (80, 300), "zh": (60, 200)}
+MIN_CHARS, MAX_CHARS = LIMITS["ja"]
 PER_NOVEL = 3
 
-_SENTENCES = re.compile(r"[^。！？!?\n]*[。！？!?]+[」』）)]*|[^。！？!?\n]+")
-_KANJI = re.compile(r"[㐀-䶿一-鿿々〆]")
 
-
-def candidates(text: str) -> list[str]:
+def candidates(text: str, lang: str = "ja") -> list[str]:
     """Every window of one to three sentences that fits the length limits, in text order."""
-    sentences = [s.strip() for s in _SENTENCES.findall(normalise(text)) if s.strip()]
+    low, high = LIMITS[lang]
+    pattern = languages.sentence_pattern(lang)
+    sentences = [s.strip() for s in pattern.findall(languages.normalise(lang, text)) if s.strip()]
     found = []
     for start in range(len(sentences)):
         joined = ""
         for end in range(start, min(start + 3, len(sentences))):
             joined += sentences[end]
-            if len(joined) > MAX_CHARS:
+            if len(joined) > high:
                 break
-            if len(joined) >= MIN_CHARS and _KANJI.search(joined):
+            if len(joined) >= low and languages.has_script(lang, joined):
                 found.append(joined)
                 break
     return found
 
 
-def pick(text: str, count: int) -> list[str]:
+def pick(text: str, count: int, lang: str = "ja") -> list[str]:
     """Up to ``count`` windows spread evenly through the text."""
-    windows = candidates(text)
+    windows = candidates(text, lang)
     if count <= 0 or not windows:
         return []
     chosen: list[str] = []
@@ -52,18 +51,19 @@ def pick(text: str, count: int) -> list[str]:
     return chosen
 
 
-def tokenise(conn: sqlite3.Connection, text: str) -> list[list]:
+def tokenise(conn: sqlite3.Connection, text: str, lang: str = "ja") -> list[list]:
     """``[surface, lemma_id or None, pos or None]`` for each token of the text."""
     out: list[list] = []
-    for surface, word in iter_tokens(text):
+    name_pos = languages.get(lang).name_pos
+    for surface, word in languages.iter_tokens(lang, text):
         if surface == "\n":
             continue
-        if word is None or word.pos == NAME_POS:
+        if word is None or word.pos == name_pos:
             out.append([surface, None, word.pos if word else None])
             continue
         row = conn.execute(
             "SELECT id FROM lemma WHERE language = ? AND lemma = ? AND pos = ?",
-            (LANGUAGE, word.lemma, word.pos),
+            (lang, word.lemma, word.pos),
         ).fetchone()
         out.append([surface, row[0] if row else None, word.pos])
     return out
@@ -80,9 +80,10 @@ def save_excerpts(
 ) -> int:
     """Store up to ``want`` new excerpts from a chapter, never more than PER_NOVEL in all."""
     room = PER_NOVEL - have(conn, novel_id)
+    lang = novel_language(conn, novel_id)
     saved = 0
-    for window in pick(text, min(want, room)):
-        tokens = tokenise(conn, window)
+    for window in pick(text, min(want, room), lang):
+        tokens = tokenise(conn, window, lang)
         cursor = conn.execute(
             "INSERT OR IGNORE INTO excerpt (novel_id, chapter_no, text, chars, tokens)"
             " VALUES (?, ?, ?, ?, ?)",

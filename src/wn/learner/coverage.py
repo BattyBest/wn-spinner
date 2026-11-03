@@ -1,4 +1,4 @@
-"""What the model says about novels and domains: personal coverage, bands, JLPT level."""
+"""What the model says about novels and domains: personal coverage, bands, JLPT or HSK level."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from .. import lang as languages
 from ..analysis.store import is_name
-from . import LANGUAGE
 from .domains import DOMAIN_KEYS
 from .model import Learner, Params, p_know
 
@@ -16,7 +16,7 @@ TARGET = 0.965
 BANDS = (("comfortable", 0.98), ("stretch", 0.95), ("hard", 0.90), ("too_hard", 0.0))
 UNKNOWN_BELOW = 0.5  # a word counts as "probably unknown" under this chance
 REPEAT_MIN = 5
-JLPT_KNOWN_SHARE = 0.8
+LEVEL_KNOWN_SHARE = 0.8
 DOMAIN_WORDS = 500
 DOMAIN_MIN_WORDS = 20
 
@@ -48,6 +48,7 @@ class NovelFit:
 def novel_fits(catalog: sqlite3.Connection, learner: Learner) -> dict[int, NovelFit]:
     """Predicted coverage for every analysed novel: expected known tokens over all tokens."""
     lex = learner.lexicon
+    lang = lex.lang
     chance: dict[int, float] = {}
     known = defaultdict(float)
     total = defaultdict(int)
@@ -58,10 +59,10 @@ def novel_fits(catalog: sqlite3.Connection, learner: Learner) -> dict[int, Novel
         "SELECT nl.novel_id, nl.lemma_id, nl.count, nl.is_name, l.lemma, l.oov"
         " FROM novel_lemma nl JOIN lemma l ON l.id = nl.lemma_id"
         " WHERE l.language = ? AND nl.novel_id IN (SELECT novel_id FROM novel_stats)",
-        (LANGUAGE,),
+        (lang,),
     )
     for row in rows:
-        if is_name(row):
+        if is_name(row, lang):
             continue
         lemma_id, count, novel_id = row["lemma_id"], row["count"], row["novel_id"]
         p = chance.get(lemma_id)
@@ -96,6 +97,7 @@ def unknown_words(
     Words you have already marked (known or not) are left out; there is nothing to ask.
     """
     out = []
+    lang = learner.lexicon.lang
     rows = catalog.execute(
         "SELECT nl.lemma_id, nl.count, nl.is_name, l.lemma, l.pos, l.reading, l.gloss, l.oov,"
         " l.corpus_rank FROM novel_lemma nl JOIN lemma l ON l.id = nl.lemma_id"
@@ -103,7 +105,7 @@ def unknown_words(
         (novel_id,),
     )
     for row in rows:
-        if is_name(row):
+        if is_name(row, lang):
             continue
         if learner.status.get(learner.lexicon.keys.get(row["lemma_id"], ("", ""))) is not None:
             continue  # already answered: marked words leave the to-mark list either way
@@ -137,7 +139,7 @@ def _domain_words(catalog: sqlite3.Connection, learner: Learner) -> dict[str, li
         r[0]: r[1]
         for r in catalog.execute(
             "SELECT id, corpus_count FROM lemma WHERE language = ? AND corpus_rank IS NOT NULL",
-            (LANGUAGE,),
+            (lex.lang,),
         )
     }
     for lemma_id, weights in lex.weights.items():
@@ -158,9 +160,10 @@ def domain_strengths(catalog: sqlite3.Connection, learner: Learner) -> list[dict
     The range moves only the domain's own offset by one standard deviation each way; it does
     not include the uncertainty of general ability.
     """
+    local = "name_zh" if learner.lexicon.lang == "zh" else "name_ja"
     names = {
-        r["key"]: (r["name_en"], r["name_ja"])
-        for r in catalog.execute("SELECT key, name_en, name_ja FROM domain")
+        r["key"]: (r["name_en"], r[local])
+        for r in catalog.execute(f"SELECT key, name_en, {local} FROM domain")
     }
     words = _domain_words(catalog, learner)
     params = learner.params
@@ -170,7 +173,7 @@ def domain_strengths(catalog: sqlite3.Connection, learner: Learner) -> list[dict
         entry = {
             "key": key,
             "name_en": names.get(key, (key, key))[0],
-            "name_ja": names.get(key, (key, key))[1],
+            "name_local": names.get(key, (key, key))[1],
             "delta": params.deltas[key],
             "delta_sd": params.delta_sds[key],
             "words": len(ids),
@@ -206,22 +209,28 @@ def weakest_domain(strengths: list[dict]) -> str | None:
     return min(tested, key=lambda s: s["share"])["key"] if tested else None
 
 
-def jlpt_estimate(catalog: sqlite3.Connection, learner: Learner) -> dict:
-    """Share of each JLPT list you are expected to know, over the words the catalog has seen.
+def level_estimate(catalog: sqlite3.Connection, learner: Learner) -> dict:
+    """Share of each JLPT (or HSK) list you are expected to know, over the words seen.
 
     The estimate is the hardest level where at least 80% are known. Words the catalog has
     never met are left out, so each level also reports how many of its words were checked.
+    Levels come easiest first.
     """
     lex = learner.lexicon
+    language = languages.get(lex.lang)
     best_rank: dict[str, int] = {}
     for lemma_id, (lemma, _pos) in lex.keys.items():
         rank = lex.rank.get(lemma_id)
         if rank and (lemma not in best_rank or rank < lex.rank[best_rank[lemma]]):
             best_rank[lemma] = lemma_id
     levels = []
-    for level in (5, 4, 3, 2, 1):
+    for level in language.levels:
         words = [
-            r[0] for r in catalog.execute("SELECT lemma FROM jlpt_word WHERE level = ?", (level,))
+            r[0]
+            for r in catalog.execute(
+                "SELECT lemma FROM level_word WHERE language = ? AND level = ?",
+                (language.code, level),
+            )
         ]
         ids = [best_rank[w] for w in set(words) if w in best_rank]
         share = sum(learner.p(i) for i in ids) / len(ids) if ids else None
@@ -229,11 +238,19 @@ def jlpt_estimate(catalog: sqlite3.Connection, learner: Learner) -> dict:
             {"level": level, "total": len(set(words)), "checked": len(ids), "share": share}
         )
     reached = [
-        e["level"] for e in levels if e["share"] is not None and e["share"] >= JLPT_KNOWN_SHARE
+        e["level"] for e in levels if e["share"] is not None and e["share"] >= LEVEL_KNOWN_SHARE
     ]
-    estimate = min(reached) if reached else None
+    estimate = None
+    for level in language.levels:  # the hardest level reached is the last one in the list
+        if level in reached:
+            estimate = level
     loaded = any(e["total"] for e in levels)
-    return {"loaded": loaded, "estimate": estimate, "levels": levels}
+    return {
+        "name": language.level_name,
+        "loaded": loaded,
+        "estimate": estimate,
+        "levels": levels,
+    }
 
 
 def vocabulary_size(params: Params) -> int:

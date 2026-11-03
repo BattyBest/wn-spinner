@@ -13,7 +13,10 @@
 		type TestProgress,
 		type TestStatus
 	} from '#lib/api';
-	import { JLPT_LABEL } from '#lib/format';
+	import { levelLabel } from '#lib/format';
+	import { current } from '#lib/lang';
+
+	const L = current();
 
 	type Mode = 'loading' | 'start' | 'running' | 'result' | 'error';
 	const RATINGS = [
@@ -179,7 +182,11 @@
 				Some words are made up. Saying you know one makes your other answers count for less, so
 				guessing doesn't help.
 			</li>
-			<li>Keys: K for "I know it", J for "I don't", R to show the reading.</li>
+			<li>
+				Keys: K for "I know it", J for "I don't", R to show the {L.code === 'zh'
+					? 'pinyin'
+					: 'reading'}.
+			</li>
 		</ul>
 		<div class="mt-6 flex flex-wrap gap-3">
 			{#if status.unfinished}
@@ -215,7 +222,7 @@
 		{#if status.excerpts === 0}
 			<p class="mt-4 text-sm text-muted">
 				No passages are saved yet, so only the word check will run. Run
-				<code class="font-mono">uv run wn syosetu excerpts</code> to add them.
+				<code class="font-mono">uv run wn {L.command} excerpts</code> to add them.
 			</p>
 		{/if}
 	{/if}
@@ -241,8 +248,8 @@
 		{@const word = item.type === 'word' ? item.lemma : item.text}
 		<section class="mt-6 rounded-xl border border-line bg-surface p-6 text-center">
 			<p class="text-sm text-muted">Do you know this word?</p>
-			<p class="mt-4 text-5xl font-semibold tracking-wide" lang="ja">{word}</p>
-			<p class="mt-3 min-h-6 text-lg text-muted" lang="ja">
+			<p class="mt-4 text-5xl font-semibold tracking-wide" lang={L.htmlLang}>{word}</p>
+			<p class="mt-3 min-h-6 text-lg text-muted" lang={L.htmlLang}>
 				{#if item.type === 'word' && showReading}{item.reading ?? ''}{/if}
 			</p>
 			{#if item.type === 'word'}
@@ -251,7 +258,8 @@
 					class="mt-1 text-xs text-accent underline"
 					onclick={() => (showReading = !showReading)}
 				>
-					{showReading ? 'Hide reading' : 'Show reading (R)'}
+					{showReading ? 'Hide' : 'Show'}
+					{L.code === 'zh' ? 'pinyin' : 'reading'}{showReading ? '' : ' (R)'}
 				</button>
 			{/if}
 			<div class="mt-6 grid grid-cols-2 gap-3">
@@ -276,8 +284,8 @@
 	{:else if item.type === 'meaning'}
 		<section class="mt-6 rounded-xl border border-line bg-surface p-6">
 			<p class="text-sm text-muted">Which meaning fits this word?</p>
-			<p class="mt-3 text-center text-4xl font-semibold" lang="ja">{item.lemma}</p>
-			<p class="mt-1 text-center text-muted" lang="ja">{item.reading ?? ''}</p>
+			<p class="mt-3 text-center text-4xl font-semibold" lang={L.htmlLang}>{item.lemma}</p>
+			<p class="mt-1 text-center text-muted" lang={L.htmlLang}>{item.reading ?? ''}</p>
 			<ul class="mt-5 grid gap-2">
 				{#each item.choices as choice, i (i)}
 					<li>
@@ -309,7 +317,7 @@
 			<p class="text-sm text-muted">
 				Tap every word you don't know. Then say how much you understood.
 			</p>
-			<p class="mt-4 text-lg leading-loose" lang="ja">
+			<p class="mt-4 text-lg leading-loose" lang={L.htmlLang}>
 				{#each item.tokens as [surface, tappable], i (i)}
 					{#if cloze && cloze.index === i}
 						<span class="mx-0.5 rounded bg-line px-2 py-0.5 text-muted">＿＿＿</span>
@@ -345,7 +353,7 @@
 						{#each cloze.choices as choice, i (i)}
 							<label
 								class="flex items-center justify-center rounded-lg border border-line bg-bg px-3 py-2 text-sm has-[:checked]:border-accent"
-								lang="ja"
+								lang={L.htmlLang}
 							>
 								<input
 									type="radio"
@@ -392,15 +400,18 @@
 			</dd>
 		</div>
 		<div class="rounded-xl border border-line bg-surface p-4">
-			<dt class="text-muted">JLPT</dt>
+			<dt class="text-muted">{profile.level.name}</dt>
 			<dd class="text-2xl font-semibold">
-				{profile.jlpt.loaded ? JLPT_LABEL(profile.jlpt.estimate) : 'not loaded'}
+				{profile.level.loaded
+					? levelLabel(profile.level.name, profile.level.estimate)
+					: 'not loaded'}
 			</dd>
 			<dd class="text-xs text-muted">
-				{#if profile.jlpt.loaded}
+				{#if profile.level.loaded}
 					the hardest level where you know at least 80%
 				{:else}
-					run <code class="font-mono">wn dict fetch</code> to add the JLPT lists
+					run <code class="font-mono">wn dict fetch --lang {L.code}</code> to add the {profile.level
+						.name} lists
 				{/if}
 			</dd>
 		</div>

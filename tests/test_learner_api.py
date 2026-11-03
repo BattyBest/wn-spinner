@@ -202,7 +202,7 @@ def test_profile_summary(tested):
     fantasy = next(d for d in profile["domains"] if d["key"] == "fantasy")
     assert fantasy["share"] is not None and fantasy["low"] <= fantasy["share"] <= fantasy["high"]
     assert next(d for d in profile["domains"] if d["key"] == "school")["share"] is None
-    assert profile["jlpt"]["loaded"] is False and profile["jlpt"]["estimate"] is None
+    assert profile["level"]["loaded"] is False and profile["level"]["estimate"] is None
     assert profile["weakest_domain"] in {"money", "fantasy", None}
 
 
@@ -215,11 +215,15 @@ def test_jlpt_estimate_uses_the_lists_that_are_loaded(tested):
             catalog.execute("SELECT lemma FROM lemma ORDER BY corpus_rank LIMIT 300")
         )
     }
-    rows = [(names[i], "", 5) for i in range(0, 30)] + [(names[i], "", 1) for i in range(200, 260)]
-    catalog.executemany("INSERT INTO jlpt_word (lemma, reading, level) VALUES (?, ?, ?)", rows)
+    rows = [("ja", names[i], "", 5) for i in range(0, 30)] + [
+        ("ja", names[i], "", 1) for i in range(200, 260)
+    ]
+    catalog.executemany(
+        "INSERT INTO level_word (language, lemma, reading, level) VALUES (?, ?, ?, ?)", rows
+    )
     catalog.commit()
     catalog.close()
-    jlpt = client.get("/api/profile").json()["jlpt"]
+    jlpt = client.get("/api/profile").json()["level"]
     assert jlpt["loaded"]
     levels = {e["level"]: e for e in jlpt["levels"]}
     assert levels[5]["share"] > 0.7 > levels[1]["share"]
