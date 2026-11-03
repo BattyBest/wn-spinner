@@ -1,4 +1,9 @@
-"""Per-host pacing: at most one request at a time, with a minimum gap between them."""
+"""Per-host pacing: at most one request at a time, with a minimum gap between them.
+
+The gap is measured from the start of one request to the start of the next, the way
+Crawl-delay is usually read: a request that takes longer than the delay is followed by
+the next one straight away, and a fast one waits out only what is left.
+"""
 
 from __future__ import annotations
 
@@ -29,11 +34,14 @@ class RateLimiter:
         return max(0.0, last + delay - self._clock())
 
     async def wait(self, host: str, delay: float) -> None:
-        """Wait out the gap since this host's last request. Call with the lock held."""
+        """Wait out what is left of the gap since this host's last request started.
+
+        Call with the lock held.
+        """
         pause = self.remaining(host, delay)
         if pause > 0:
             await self._sleep(pause)
 
     def mark(self, host: str) -> None:
-        """Record that a request to ``host`` has just finished."""
+        """Record that a request to ``host`` is starting now. Call just before sending."""
         self._last[host] = self._clock()

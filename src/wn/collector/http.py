@@ -264,7 +264,6 @@ class Collector:
                 try:
                     response, final_url = await self._get(url, host, delay)
                 except httpx.HTTPError as exc:
-                    self._limiter.mark(host)
                     failure: str | None = f"network error: {type(exc).__name__}"
                     status, body, wait_more = None, b"", 0.0
                 else:
@@ -301,15 +300,17 @@ class Collector:
     async def _get(self, url: str, host: str, delay: float) -> tuple[httpx.Response, str]:
         """GET with the honest User-Agent, following redirects that stay on the same host.
 
-        Every hop is a real request, so each one waits out the host delay first.
+        Every hop is a real request, so each one waits out the host delay first. The delay
+        runs from when a request is sent, so time spent waiting for the response counts
+        toward it.
         """
         for hop in range(MAX_REDIRECTS + 1):
             if hop:
                 await self._limiter.wait(host, delay)
+            self._limiter.mark(host)
             response = await self._client.get(
                 url, headers={"User-Agent": USER_AGENT}, follow_redirects=False
             )
-            self._limiter.mark(host)
             location = response.headers.get("Location")
             if response.status_code in (301, 302, 303, 307, 308) and location:
                 target = urljoin(url, location)
