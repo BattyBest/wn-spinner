@@ -19,6 +19,9 @@
 		WEIGHT_KEYS
 	} from '#lib/api';
 	import { BAND_HINT, BAND_LABEL, STATUS_LABEL, characters } from '#lib/format';
+	import { current } from '#lib/lang';
+
+	const L = current();
 
 	const PAGE = 24;
 	const SORTS: { value: Sort; label: string }[] = [
@@ -31,7 +34,7 @@
 	const WEIGHT_LABELS: Record<keyof Weights, { label: string; hint: string }> = {
 		fit: { label: 'Fits my level', hint: 'Close to a comfortable stretch for you' },
 		ease: { label: 'Easy vocabulary', hint: 'The 3,000 most common words cover more of it' },
-		popularity: { label: 'Popular', hint: 'More Syosetu points' },
+		popularity: { label: 'Popular', hint: `More ${L.site} points` },
 		recent: { label: 'Recently updated', hint: 'Newer updates first' },
 		length: { label: 'Long', hint: 'Longer novels first' },
 		completed: { label: 'Completed', hint: 'A bonus for finished novels' },
@@ -183,7 +186,7 @@
 
 <h1 class="text-2xl font-semibold tracking-tight">Discover</h1>
 <p class="mt-2 text-muted">
-	Japanese web novels from Syosetu.
+	{L.code === 'zh' ? 'Chinese web novels from jjwxc.' : 'Japanese web novels from Syosetu.'}
 	{#if tested}
 		Each card shows how much of the text you are expected to know, and "Best for me" puts the novels
 		closest to a comfortable stretch first.
@@ -331,7 +334,7 @@
 		</label>
 		<label class="flex items-center gap-2">
 			<input type="checkbox" bind:checked={showR15} onchange={changed} class="accent-accent" />
-			Show R15 works
+			{L.code === 'zh' ? 'Show mature books' : 'Show R15 works'}
 		</label>
 		{#if activeFilters}
 			<button type="button" class="text-accent underline" onclick={clear}>Clear filters</button>
@@ -351,14 +354,14 @@
 			<div class="rounded-xl border border-dashed border-line bg-surface p-5">
 				<p class="text-sm font-medium">No novels collected yet</p>
 				<p class="mt-1 text-sm text-muted">
-					Run <code class="font-mono">uv run wn syosetu run</code> in a terminal. It saves rankings and
-					metadata first, so this page fills within seconds, then reads chapters in the background.
+					Run <code class="font-mono">uv run wn {L.command} run</code> in a terminal. It saves rankings
+					and metadata first, so this page fills within seconds, then reads chapters in the background.
 				</p>
 			</div>
 		{:else if tested && sort === 'best' && !band}
 			<p class="text-sm text-muted">
 				No novel is within your range yet. Choose Hard or Too hard under "Fit for me" to see what is
-				close, or collect more novels with <code class="font-mono">uv run wn syosetu run</code>.
+				close, or collect more novels with <code class="font-mono">uv run wn {L.command} run</code>.
 			</p>
 		{:else}
 			<p class="text-sm text-muted">No novels match these filters.</p>
@@ -385,7 +388,7 @@
 							rel="noopener noreferrer"
 							class="text-sm font-medium text-accent hover:underline"
 						>
-							Read on Syosetu ↗
+							Read on {L.site} ↗
 						</a>
 					</div>
 					<p class="mt-1 text-sm text-muted">
@@ -402,6 +405,11 @@
 						{#if novel.is_r15}
 							<span class="rounded bg-line px-1.5 font-medium text-ink">R15</span>
 						{/if}
+						{#if novel.is_mature}
+							<span class="rounded bg-line px-1.5 font-medium text-ink">Mature</span>
+						{/if}
+						{#if novel.favourites}<span>{novel.favourites.toLocaleString('en')} favourites</span
+							>{/if}
 					</p>
 					<div class="mt-3">
 						{#if novel.me}

@@ -1,13 +1,39 @@
 <script lang="ts">
 	import '../app.css';
 	import { page } from '$app/state';
+	import { onMount } from 'svelte';
 	import { screens } from '#lib/nav';
+	import { LANGS, getLang, setLang, type LangCode } from '#lib/lang';
 
 	let { children } = $props();
+
+	let lang = $state<LangCode>('ja');
+	onMount(() => (lang = getLang()));
+	const choose = (code: LangCode) => code !== lang && setLang(code);
 
 	const active = (href: string) =>
 		href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href);
 </script>
+
+{#snippet switcher()}
+	<div
+		class="inline-flex rounded-lg border border-line p-0.5 text-sm"
+		role="group"
+		aria-label="Language"
+	>
+		{#each Object.values(LANGS) as option (option.code)}
+			<button
+				type="button"
+				lang={option.htmlLang}
+				aria-pressed={lang === option.code}
+				class="rounded-md px-3 py-1 font-medium text-muted aria-pressed:bg-accent aria-pressed:text-accent-ink"
+				onclick={() => choose(option.code)}
+			>
+				{option.label}
+			</button>
+		{/each}
+	</div>
+{/snippet}
 
 <div class="min-h-screen md:grid md:grid-cols-[14rem_1fr]">
 	<aside
@@ -25,9 +51,11 @@
 				</a>
 			{/each}
 		</nav>
+		<div class="mt-auto">{@render switcher()}</div>
 	</aside>
 
 	<main class="mx-auto w-full max-w-3xl px-4 pt-6 pb-28 md:px-8 md:pt-10 md:pb-10">
+		<div class="mb-4 flex justify-end md:hidden">{@render switcher()}</div>
 		{@render children()}
 	</main>
 

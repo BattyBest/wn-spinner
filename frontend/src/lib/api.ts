@@ -12,8 +12,15 @@ export type Stats = {
 	sources: { name: string; language: string; novels: number }[];
 };
 
+import { getLang } from './lang';
+
+/** Adds the chosen language to a request path. Server routes that don't use it ignore it. */
+function withLang(path: string): string {
+	return `${path}${path.includes('?') ? '&' : '?'}lang=${getLang()}`;
+}
+
 async function get<T>(path: string): Promise<T> {
-	const response = await fetch(path);
+	const response = await fetch(withLang(path));
 	if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
 	return (await response.json()) as T;
 }
@@ -25,7 +32,8 @@ export type CardStats = {
 	cover_1k: number;
 	cover_3k: number;
 	cover_10k: number;
-	kanji_pct: number;
+	kanji_pct: number | null; // null for Chinese
+	idiom_rate: number | null; // Chinese only
 	dialogue_pct: number;
 	sample_chars: number;
 };
@@ -45,6 +53,7 @@ export type Personal = {
 export type NovelCard = {
 	id: number;
 	ncode: string;
+	language?: 'ja' | 'zh';
 	title: string;
 	author: string | null;
 	genre: string | null;
@@ -53,6 +62,8 @@ export type NovelCard = {
 	chapter_count: number | null;
 	length_chars: number | null;
 	is_r15: boolean;
+	is_mature: boolean;
+	favourites: number | null;
 	points: number | null;
 	url: string;
 	last_up: string | null;
@@ -89,7 +100,8 @@ export type NovelDetail = Omit<NovelCard, 'stats'> & {
 		cover_5k: number;
 		cover_10k: number;
 		sentence_len: number | null;
-		kanji_pct: number;
+		kanji_pct: number | null;
+		idiom_rate: number | null;
 		dialogue_pct: number;
 		rare_load: number;
 	} | null;
@@ -265,7 +277,7 @@ export type TestAnswer = {
 
 export const getTestStatus = () => get<TestStatus>('/api/test/status');
 export const startTest = (kind: 'full' | 'quick') =>
-	send<TestStep & { session: number }>('POST', '/api/test/start', { kind });
+	send<TestStep & { session: number }>('POST', '/api/test/start', { kind, lang: getLang() });
 export const getTestStep = (session: number) => get<TestStep>(`/api/test/${session}/next`);
 export const answerTest = (session: number, answer: TestAnswer) =>
 	send<TestStep>('POST', `/api/test/${session}/answer`, answer);
@@ -273,7 +285,7 @@ export const answerTest = (session: number, answer: TestAnswer) =>
 export type DomainStrength = {
 	key: string;
 	name_en: string;
-	name_ja: string;
+	name_local: string;
 	delta: number;
 	delta_sd: number;
 	words: number;
@@ -283,12 +295,14 @@ export type DomainStrength = {
 };
 
 export type Profile = {
+	language?: 'ja' | 'zh';
 	tested: boolean;
 	answers: number;
 	vocabulary: number;
 	vocabulary_range: [number, number];
 	guess_rate: number;
-	jlpt: {
+	level: {
+		name: 'JLPT' | 'HSK';
 		loaded: boolean;
 		estimate: number | null;
 		levels: { level: number; total: number; checked: number; share: number | null }[];
@@ -340,6 +354,6 @@ export const setWordDomain = (
 	action: 'add' | 'remove' | 'clear'
 ) => send<void>('PUT', '/api/words/domains', { lemma_id, domain, action });
 export const getDomains = () =>
-	get<{ key: string; name_en: string; name_ja: string }[]>('/api/domains');
+	get<{ key: string; name_en: string; name_ja: string; name_zh: string }[]>('/api/domains');
 export const sendFeedback = (id: number, felt: 'easier' | 'right' | 'harder', note?: string) =>
 	send<void>('POST', `/api/novels/${id}/feedback`, { felt, note });

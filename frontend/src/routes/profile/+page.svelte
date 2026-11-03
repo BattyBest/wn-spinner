@@ -10,7 +10,10 @@
 		type Profile,
 		type WordItem
 	} from '#lib/api';
-	import { JLPT_LABEL, percent } from '#lib/format';
+	import { levelLabel, levelName, percent } from '#lib/format';
+	import { current } from '#lib/lang';
+
+	const L = current();
 
 	let profile = $state<Profile | null>(null);
 	let failed = $state(false);
@@ -123,12 +126,12 @@
 			</dd>
 		</div>
 		<div class="rounded-xl border border-line bg-surface p-4">
-			<dt class="text-muted">JLPT</dt>
+			<dt class="text-muted">{profile.level.name}</dt>
 			<dd class="text-2xl font-semibold">
-				{profile.jlpt.loaded ? JLPT_LABEL(profile.jlpt.estimate) : '–'}
+				{profile.level.loaded ? levelLabel(profile.level.name, profile.level.estimate) : '–'}
 			</dd>
 			<dd class="text-xs text-muted">
-				{profile.jlpt.loaded ? 'hardest level with 80% known' : 'lists not loaded'}
+				{profile.level.loaded ? 'hardest level with 80% known' : 'lists not loaded'}
 			</dd>
 		</div>
 		<div class="rounded-xl border border-line bg-surface p-4">
@@ -140,16 +143,16 @@
 		</div>
 	</dl>
 
-	{#if profile.jlpt.loaded}
+	{#if profile.level.loaded}
 		<section class="mt-8">
-			<h2 class="text-sm font-semibold">JLPT lists</h2>
+			<h2 class="text-sm font-semibold">{profile.level.name} lists</h2>
 			<p class="mt-1 text-sm text-muted">
 				Expected share known, over the words each list has that this catalog has seen.
 			</p>
-			<ul class="mt-3 grid gap-2 sm:grid-cols-5">
-				{#each [...profile.jlpt.levels].reverse() as level (level.level)}
+			<ul class="mt-3 grid gap-2 sm:grid-cols-4">
+				{#each [...profile.level.levels].reverse() as level (level.level)}
 					<li class="rounded-lg border border-line bg-surface p-3 text-sm">
-						<p class="font-medium">N{level.level}</p>
+						<p class="font-medium">{levelName(profile.level.name, level.level)}</p>
 						<p class="text-lg font-semibold">{percent(level.share)}</p>
 						<p class="text-xs text-muted">{level.checked} of {level.total} words</p>
 					</li>
@@ -210,13 +213,13 @@
 	</p>
 	<div class="mt-3 grid gap-3 rounded-xl border border-line bg-surface p-4 sm:grid-cols-3">
 		<label class="text-sm sm:col-span-3">
-			<span class="text-muted">Search a word or reading</span>
+			<span class="text-muted">Search a word or {L.code === 'zh' ? 'pinyin' : 'reading'}</span>
 			<input
 				type="search"
 				bind:value={q}
 				oninput={() => (offset = 0)}
 				class="mt-1 w-full rounded-lg border border-line bg-bg px-3 py-2"
-				lang="ja"
+				lang={L.htmlLang}
 			/>
 		</label>
 		<label class="text-sm">
@@ -259,9 +262,9 @@
 					<li class="rounded-lg border border-line bg-surface px-3 py-2 text-sm">
 						<div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
 							<span>
-								<span class="text-base font-medium" lang="ja">{word.lemma}</span>
+								<span class="text-base font-medium" lang={L.htmlLang}>{word.lemma}</span>
 								{#if word.reading && word.reading !== word.lemma}
-									<span class="text-muted" lang="ja"> {word.reading}</span>
+									<span class="text-muted" lang={L.htmlLang}> {word.reading}</span>
 								{/if}
 								<span class="text-muted"> · {word.gloss ?? 'no gloss'}</span>
 							</span>
