@@ -64,6 +64,16 @@ class Cache:
         )
         self._conn.commit()
 
+    def delete(self, url: str) -> bool:
+        """Delete one cached page. Returns whether there was one."""
+        row = self._conn.execute("SELECT path FROM cache_entry WHERE url = ?", (url,)).fetchone()
+        if row is None:
+            return False
+        (self._root / row["path"]).unlink(missing_ok=True)
+        self._conn.execute("DELETE FROM cache_entry WHERE url = ?", (url,))
+        self._conn.commit()
+        return True
+
     def stats(self) -> list[dict]:
         rows = self._conn.execute(
             "SELECT host, kind, COUNT(*) AS pages, SUM(bytes) AS bytes"

@@ -39,3 +39,15 @@ def test_stats_and_purge_by_kind(tmp_path):
     assert cache.get("https://a.test/robots.txt", max_age=None) is not None
     assert cache.purge() == 1
     assert cache.stats() == []
+
+
+def test_delete_removes_one_page_only(tmp_path):
+    conn = open_catalog(tmp_path)
+    cache = Cache(conn, tmp_path / "cache")
+    cache.put("https://a.test/1", "chapter", 200, b"one")
+    cache.put("https://a.test/2", "chapter", 200, b"two")
+    assert cache.delete("https://a.test/1") is True
+    assert cache.delete("https://a.test/1") is False
+    assert cache.get("https://a.test/1", max_age=None) is None
+    assert cache.get("https://a.test/2", max_age=None) is not None
+    assert len(list((tmp_path / "cache").rglob("*.gz"))) == 1
