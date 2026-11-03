@@ -1,7 +1,9 @@
 """The one gate every request passes through.
 
 Order of checks for ``Collector.fetch``: disk cache, host suspension, robots.txt,
-daily cap, then the per-host delay. Failures are retried with back-off; repeated
+then the per-host delay, followed by the suspension and daily-cap checks again just
+before the request is sent. Requests to one host may overlap (at most ``MAX_CONNECTIONS``)
+but start no closer together than the host's delay. Failures are retried with back-off; repeated
 failures, or a CAPTCHA/challenge page, shut the host off until the next UTC day.
 There is deliberately no way around a challenge: the collector just stops.
 """
@@ -40,6 +42,11 @@ _FETCH_OUTCOMES = ("ok", "client_error", "server_error", "network_error", "chall
 _CHALLENGE = re.compile(
     r"captcha|cf-chl|challenge-platform|just a moment|verify you are human", re.IGNORECASE
 )
+
+
+# Called once per real request (each redirect hop and retry too, never for cache hits):
+# url, HTTP status (None if no response came), wall-clock send time, seconds taken, error.
+RequestHook = Callable[[str, int | None, float, float, str | None], None]
 
 
 class CollectorError(Exception):
@@ -110,6 +117,7 @@ class Collector:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         wall: Callable[[], float] = time.time,
         jitter: Callable[[], float] = random.random,
+        on_request: RequestHook | None = None,
     ):
         self._conn = conn
         self._cache = cache
@@ -118,7 +126,10 @@ class Collector:
         self._sleep = sleep
         self._wall = wall
         self._jitter = jitter
+        self._on_request = on_request
         self._robots: dict[str, RobotsRules] = {}
+        self._robots_locks: dict[str, asyncio.Lock] = {}
+        self._pending: dict[str, int] = {}  # requests sent but not yet logged, per host
 
     # --- bookkeeping in fetch_log -------------------------------------------------
 
@@ -182,6 +193,13 @@ class Collector:
         known = self._cached_rules(host, scheme)
         if known is not None:
             return known
+        async with self._robots_locks.setdefault(host, asyncio.Lock()):
+            known = self._cached_rules(host, scheme)  # another task may have fetched it
+            if known is not None:
+                return known
+            return await self._fetch_rules(host, scheme)
+
+    async def _fetch_rules(self, host: str, scheme: str) -> RobotsRules:
         url = f"{scheme}://{host}/robots.txt"
         status, body = await self._network(url, "robots", host)
         if status == 200:
@@ -251,20 +269,16 @@ class Collector:
         if rules is None:
             rules = self._robots.get(host)
         delay = self._effective_delay(host, rules)
-        async with self._limiter.lock(host):
+        async with self._limiter.slot(host):
             for attempt in range(MAX_RETRIES + 1):
-                if self.is_suspended(host):
-                    raise HostSuspended(f"{host} is switched off until tomorrow (UTC)")
-                if self.requests_today(host) >= policy.daily_cap:
-                    raise DailyCapReached(
-                        f"{host}: daily cap of {policy.daily_cap} requests reached"
-                    )
-                await self._limiter.wait(host, delay)
+                await self._pace(host, delay, policy)
                 started = time.monotonic()
                 try:
-                    response, final_url = await self._get(url, host, delay)
+                    try:
+                        response, final_url = await self._get(url, host, delay, policy)
+                    finally:
+                        self._pending[host] -= 1
                 except httpx.HTTPError as exc:
-                    self._limiter.mark(host)
                     failure: str | None = f"network error: {type(exc).__name__}"
                     status, body, wait_more = None, b"", 0.0
                 else:
@@ -284,7 +298,8 @@ class Collector:
                 if attempt < MAX_RETRIES:
                     self._log(host, url, status, started, "retry")
                     backoff = 2.0 * 2**attempt + self._jitter()
-                    await self._sleep(max(backoff, wait_more))
+                    # Hold the whole host, not just this request: it is in trouble.
+                    self._limiter.hold(host, max(backoff, wait_more))
                     continue
                 self._log(
                     host,
@@ -298,18 +313,48 @@ class Collector:
                 raise FetchFailed(f"{host}: {failure} after {MAX_RETRIES + 1} attempts")
         raise AssertionError("unreachable")  # pragma: no cover
 
-    async def _get(self, url: str, host: str, delay: float) -> tuple[httpx.Response, str]:
+    async def _pace(self, host: str, delay: float, policy, *, count: bool = True) -> None:
+        """Wait for this host's next start time, then claim it. Raises if the host is off.
+
+        Requests queue here one at a time, so starts are spaced by ``delay`` however many
+        are in flight. The suspension and daily-cap checks run after the wait, when
+        earlier requests have finished and been logged; requests still in flight count
+        toward the cap so overlapping requests cannot overshoot it.
+        """
+        async with self._limiter.gate(host):
+            await self._limiter.wait(host, delay)
+            if self.is_suspended(host):
+                raise HostSuspended(f"{host} is switched off until tomorrow (UTC)")
+            if self.requests_today(host) + self._pending.get(host, 0) >= policy.daily_cap:
+                raise DailyCapReached(f"{host}: daily cap of {policy.daily_cap} requests reached")
+            self._limiter.mark(host)
+            if count:
+                self._pending[host] = self._pending.get(host, 0) + 1
+
+    def _report(
+        self, url: str, status: int | None, sent_at: float, began: float, error: str | None
+    ) -> None:
+        if self._on_request is not None:
+            self._on_request(url, status, sent_at, time.monotonic() - began, error)
+
+    async def _get(self, url: str, host: str, delay: float, policy) -> tuple[httpx.Response, str]:
         """GET with the honest User-Agent, following redirects that stay on the same host.
 
-        Every hop is a real request, so each one waits out the host delay first.
+        The first request goes out at once: the caller has already paced it with ``_pace``.
+        Every later hop is a real request too, so it waits out the host delay first.
         """
         for hop in range(MAX_REDIRECTS + 1):
             if hop:
-                await self._limiter.wait(host, delay)
-            response = await self._client.get(
-                url, headers={"User-Agent": USER_AGENT}, follow_redirects=False
-            )
-            self._limiter.mark(host)
+                await self._pace(host, delay, policy, count=False)
+            sent_at, began = self._wall(), time.monotonic()
+            try:
+                response = await self._client.get(
+                    url, headers={"User-Agent": USER_AGENT}, follow_redirects=False
+                )
+            except httpx.HTTPError as exc:
+                self._report(url, None, sent_at, began, f"{type(exc).__name__}")
+                raise
+            self._report(url, response.status_code, sent_at, began, None)
             location = response.headers.get("Location")
             if response.status_code in (301, 302, 303, 307, 308) and location:
                 target = urljoin(url, location)

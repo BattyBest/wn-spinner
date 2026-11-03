@@ -86,6 +86,42 @@ async def test_default_delay_applies_when_robots_sets_none(collector, clock, moc
     assert clock.sleeps[-1] == 0.5
 
 
+def slow(clock, seconds: float, text: str):
+    """A response that takes ``seconds`` of (fake) time to arrive."""
+
+    def respond(request):
+        clock.now += seconds
+        return httpx.Response(200, text=text)
+
+    return respond
+
+
+async def test_delay_runs_from_request_start_not_response_end(collector, clock, mock):
+    mock.get(ROBOTS).respond(200, text="User-agent: *\nCrawl-delay: 1")
+    sent: list[float] = []
+
+    def respond(request):
+        sent.append(clock.now)
+        return slow(clock, 0.75, "x")(request)
+
+    mock.get(page(1)).mock(side_effect=respond)
+    mock.get(page(2)).mock(side_effect=respond)
+    await collector.fetch(page(1))
+    await collector.fetch(page(2))
+    assert clock.sleeps[-1] == pytest.approx(0.25)  # only what is left of the 1 s
+    assert sent[1] - sent[0] == pytest.approx(1.0)
+
+
+async def test_a_response_slower_than_the_delay_needs_no_wait(collector, clock, mock):
+    mock.get(ROBOTS).respond(200, text="User-agent: *\nCrawl-delay: 1")
+    mock.get(page(1)).mock(side_effect=slow(clock, 3.0, "a"))
+    mock.get(page(2)).respond(200, text="b")
+    await collector.fetch(page(1))
+    before = list(clock.sleeps)
+    await collector.fetch(page(2))
+    assert clock.sleeps == before
+
+
 async def test_second_fetch_comes_from_the_cache(collector, mock):
     mock.get(ROBOTS).respond(404)
     route = mock.get(page()).respond(200, text="本文")
@@ -212,3 +248,22 @@ async def test_plan_reports_without_sending(collector, mock):
 async def test_non_http_urls_are_rejected(collector):
     with pytest.raises(ValueError):
         await collector.fetch("file:///etc/passwd")
+
+
+async def test_every_request_is_reported_but_cache_hits_are_not(collector, mock):
+    seen: list[tuple[str, int | None, str | None]] = []
+    collector._on_request = lambda url, status, sent_at, seconds, error: seen.append(
+        (url, status, error)
+    )
+    mock.get(ROBOTS).respond(404)
+    mock.get(page(1)).mock(
+        side_effect=[httpx.Response(503), httpx.ConnectError("boom"), httpx.Response(200, text="a")]
+    )
+    await collector.fetch(page(1))
+    await collector.fetch(page(1))  # from the cache: nothing is sent, nothing is reported
+    assert seen == [
+        (ROBOTS, 404, None),
+        (page(1), 503, None),
+        (page(1), None, "ConnectError"),
+        (page(1), 200, None),
+    ]
