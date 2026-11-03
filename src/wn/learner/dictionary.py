@@ -31,6 +31,9 @@ from ..config import USER_AGENT
 from . import LANGUAGE
 
 JMDICT_RELEASES = "https://api.github.com/repos/scriptin/jmdict-simplified/releases/latest"
+# Release assets are named like jmdict-eng-3.6.2+20261102210542.json.zip (version, then
+# the build timestamp); the -common build and other languages are skipped.
+JMDICT_ASSET = re.compile(r"jmdict-eng-\d+(?:\.\d+)*(?:\+\d+)?\.json\.zip")
 JLPT_URLS = {
     level: f"https://raw.githubusercontent.com/jamsinclair/open-anki-jlpt-decks/main/src/n{level}.csv"
     for level in (5, 4, 3, 2, 1)
@@ -288,7 +291,7 @@ def fetch_jmdict(root: Path, client: httpx.Client, say=lambda _m: None) -> Path:
     names = [a["name"] for a in assets]
     for asset in assets:
         name = asset["name"]
-        if re.fullmatch(r"jmdict-eng-[\d.]+\.json\.zip", name):
+        if JMDICT_ASSET.fullmatch(name):
             dest = dicts_dir(root) / name
             say(f"downloading {name} ({asset.get('size', 0) // 1_000_000} MB)")
             _download(client, asset["browser_download_url"], dest)

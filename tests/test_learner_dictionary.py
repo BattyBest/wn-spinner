@@ -1,6 +1,7 @@
 import json
 import zipfile
 
+import httpx
 import pytest
 
 from wn.learner import dictionary as d
@@ -152,3 +153,28 @@ def test_jlpt_rows_without_any_level_are_an_error(conn, tmp_path):
     (tmp_path / "words.csv").write_text("反応,はんのう\n", encoding="utf-8")
     with pytest.raises(d.DictError):
         d.load_jlpt(conn, [(tmp_path / "words.csv", None)])
+
+
+def test_fetch_picks_the_full_english_build_from_real_asset_names(tmp_path):
+    # Asset names as the jmdict-simplified releases publish them (version + build stamp).
+    stamp = "3.6.2+20261102210542"
+    names = [
+        f"jmdict-all-{stamp}.json.zip",
+        f"jmdict-eng-common-{stamp}.json.zip",
+        f"jmdict-eng-{stamp}.json.tgz",
+        f"jmdict-eng-{stamp}.json.zip",
+        f"jmnedict-all-{stamp}.json.zip",
+    ]
+    base = "https://github.com/scriptin/jmdict-simplified/releases/download"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url == d.JMDICT_RELEASES:
+            assets = [{"name": n, "size": 1, "browser_download_url": f"{base}/{n}"} for n in names]
+            return httpx.Response(200, json={"assets": assets})
+        assert request.url.path.endswith(f"/jmdict-eng-{stamp}.json.zip")
+        return httpx.Response(200, content=b"zip bytes")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        path = d.fetch_jmdict(tmp_path, client)
+    assert path.name == f"jmdict-eng-{stamp}.json.zip"
+    assert path.read_bytes() == b"zip bytes"
