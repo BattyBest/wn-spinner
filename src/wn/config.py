@@ -11,23 +11,26 @@ USER_AGENT = "wn-spinner/0.1 (personal reading tool; +https://github.com/BattyBe
 
 DAY = 24 * 60 * 60
 
+# Seconds between requests to one host: the host's own robots.txt Crawl-delay when it
+# sets one, otherwise this. There is no extra floor on top of what the site asks for.
+DEFAULT_DELAY = 0.5
+
 
 @dataclass(frozen=True)
 class HostPolicy:
-    """How politely to treat one host."""
+    """Per-host limits beyond the delay, which comes from robots.txt (see DEFAULT_DELAY)."""
 
-    min_delay: float  # seconds between requests
     daily_cap: int  # network requests per UTC day
     cache_ttl: float | None  # seconds; None keeps a page until it is purged
 
 
 POLICIES: dict[str, HostPolicy] = {
-    "api.syosetu.com": HostPolicy(min_delay=1.0, daily_cap=2000, cache_ttl=DAY),
-    "ncode.syosetu.com": HostPolicy(min_delay=2.5, daily_cap=3000, cache_ttl=None),
-    "yomou.syosetu.com": HostPolicy(min_delay=2.5, daily_cap=500, cache_ttl=DAY),
-    "www.jjwxc.net": HostPolicy(min_delay=2.5, daily_cap=1000, cache_ttl=DAY),
+    "api.syosetu.com": HostPolicy(daily_cap=2000, cache_ttl=DAY),
+    "ncode.syosetu.com": HostPolicy(daily_cap=3000, cache_ttl=None),
+    "yomou.syosetu.com": HostPolicy(daily_cap=500, cache_ttl=DAY),
+    "www.jjwxc.net": HostPolicy(daily_cap=1000, cache_ttl=DAY),
 }
-DEFAULT_POLICY = HostPolicy(min_delay=5.0, daily_cap=100, cache_ttl=DAY)
+DEFAULT_POLICY = HostPolicy(daily_cap=100, cache_ttl=DAY)
 
 # robots.txt files are re-fetched at most once a day.
 ROBOTS_TTL = DAY

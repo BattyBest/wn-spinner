@@ -59,22 +59,31 @@ async def test_unreachable_robots_means_no_crawling(collector, mock):
     assert route.call_count == 0
 
 
-async def test_longer_crawl_delay_beats_our_minimum(collector, clock, mock):
+async def test_crawl_delay_from_robots_is_used(collector, clock, mock):
     mock.get(ROBOTS).respond(200, text="User-agent: *\nCrawl-delay: 10")
     mock.get(page(1)).respond(200, text="a")
     mock.get(page(2)).respond(200, text="b")
     await collector.fetch(page(1))
     await collector.fetch(page(2))
-    assert clock.sleeps[-1] == 10  # example.test's own minimum would be only 5
+    assert clock.sleeps[-1] == 10
 
 
-async def test_our_minimum_applies_when_robots_asks_for_less(collector, clock, mock):
+async def test_short_crawl_delay_is_not_padded(collector, clock, mock):
     mock.get(ROBOTS).respond(200, text="User-agent: *\nCrawl-delay: 1")
     mock.get(page(1)).respond(200, text="a")
     mock.get(page(2)).respond(200, text="b")
     await collector.fetch(page(1))
     await collector.fetch(page(2))
-    assert clock.sleeps[-1] == 5
+    assert clock.sleeps[-1] == 1  # no extra floor on top of what the site asks
+
+
+async def test_default_delay_applies_when_robots_sets_none(collector, clock, mock):
+    mock.get(ROBOTS).respond(404)
+    mock.get(page(1)).respond(200, text="a")
+    mock.get(page(2)).respond(200, text="b")
+    await collector.fetch(page(1))
+    await collector.fetch(page(2))
+    assert clock.sleeps[-1] == 0.5
 
 
 async def test_second_fetch_comes_from_the_cache(collector, mock):
@@ -103,7 +112,7 @@ async def test_429_is_retried_after_retry_after(collector, clock, conn, mock):
     assert outcomes(conn, HOST) == ["client_error", "retry", "ok"]  # robots 404 first
 
 
-async def test_backoff_doubles_but_never_undercuts_the_host_delay(collector, clock, mock):
+async def test_backoff_doubles_between_attempts(collector, clock, mock):
     mock.get(ROBOTS).respond(404)
     times: list[float] = []
 
@@ -115,7 +124,7 @@ async def test_backoff_doubles_but_never_undercuts_the_host_delay(collector, clo
     with pytest.raises(FetchFailed):
         await collector.fetch(page())
     gaps = [b - a for a, b in zip(times, times[1:], strict=False)]
-    assert gaps == [5.0, 5.0, 8.0]  # back-off 2 s and 4 s are below the 5 s host delay
+    assert gaps == [2.0, 4.0, 8.0]
 
 
 async def test_network_errors_are_retried(collector, mock):
@@ -163,9 +172,7 @@ async def test_bot_check_page_stops_the_host_for_the_day(collector, clock, mock)
 
 
 async def test_daily_cap_stops_requests_and_resets_next_day(collector, clock, monkeypatch, mock):
-    monkeypatch.setitem(
-        config.POLICIES, HOST, HostPolicy(min_delay=1.0, daily_cap=2, cache_ttl=None)
-    )
+    monkeypatch.setitem(config.POLICIES, HOST, HostPolicy(daily_cap=2, cache_ttl=None))
     mock.get(ROBOTS).respond(404)
     mock.get(page(1)).respond(200, text="a")
     mock.get(page(2)).respond(200, text="b")

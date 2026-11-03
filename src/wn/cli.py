@@ -12,7 +12,7 @@ import typer
 from . import __version__
 from .collector import Cache, Collector
 from .collector.http import CollectorError
-from .config import POLICIES, ROBOTS_TOKEN, USER_AGENT, data_dir, policy_for
+from .config import DEFAULT_DELAY, POLICIES, ROBOTS_TOKEN, USER_AGENT, data_dir, policy_for
 from .db import open_catalog
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="wn-spinner command line.")
@@ -97,8 +97,8 @@ def robots(
             typer.echo(f"{path}: {verdict}")
             typer.echo(f"rules for us:   {rules.rule_count(ROBOTS_TOKEN)}")
             typer.echo(f"their delay:    {'none' if theirs is None else f'{theirs:g} s'}")
-            typer.echo(f"our minimum:    {policy.min_delay:g} s")
-            typer.echo(f"delay in force: {max(policy.min_delay, theirs or 0):g} s")
+            typer.echo(f"our default:    {DEFAULT_DELAY:g} s (used when robots.txt sets none)")
+            typer.echo(f"delay in force: {DEFAULT_DELAY if theirs is None else theirs:g} s")
             known = "configured" if host in POLICIES else "default"
             typer.echo(f"daily cap:      {policy.daily_cap} requests ({known} policy)")
 

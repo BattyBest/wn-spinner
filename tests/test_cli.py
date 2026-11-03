@@ -15,7 +15,7 @@ def test_robots_command_prints_the_delay_in_force(tmp_path, monkeypatch):
         result = runner.invoke(app, ["robots", "ncode.syosetu.com"])
     assert result.exit_code == 0, result.output
     assert "their delay:    1 s" in result.output
-    assert "delay in force: 2.5 s" in result.output
+    assert "delay in force: 1 s" in result.output
     assert "/: allowed" in result.output
 
 

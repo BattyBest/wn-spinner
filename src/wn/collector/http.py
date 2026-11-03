@@ -19,7 +19,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from ..config import ROBOTS_TOKEN, ROBOTS_TTL, USER_AGENT, policy_for
+from ..config import DEFAULT_DELAY, ROBOTS_TOKEN, ROBOTS_TTL, USER_AGENT, policy_for
 from .cache import Cache
 from .ratelimit import RateLimiter
 from .robots import RobotsRules
@@ -196,10 +196,8 @@ class Collector:
         return rules
 
     def _effective_delay(self, host: str, rules: RobotsRules | None) -> float:
-        delay = policy_for(host).min_delay
-        if rules is not None:
-            delay = max(delay, rules.crawl_delay(ROBOTS_TOKEN) or 0.0)
-        return delay
+        theirs = None if rules is None else rules.crawl_delay(ROBOTS_TOKEN)
+        return DEFAULT_DELAY if theirs is None else theirs
 
     # --- public API ---------------------------------------------------------------
 
