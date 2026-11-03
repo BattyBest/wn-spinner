@@ -92,6 +92,15 @@ def list_novels(
     min_cover_3k: float | None = Query(None, ge=0, le=1),
     sort: Literal["popularity", "easiest", "updated", "length", "best"] = "popularity",
     band: Literal["comfortable", "stretch", "hard", "too_hard"] | None = None,
+    w_fit: float | None = Query(None, ge=0, le=100, description="Closeness to your level."),
+    w_ease: float | None = Query(None, ge=0, le=100, description="Top-3,000-word coverage."),
+    w_popularity: float | None = Query(None, ge=0, le=100),
+    w_recent: float | None = Query(None, ge=0, le=100, description="Recently updated."),
+    w_length: float | None = Query(None, ge=0, le=100, description="Longer novels."),
+    w_completed: float | None = Query(None, ge=0, le=100),
+    w_grow: float | None = Query(
+        None, ge=0, le=100, description="Percent of slots for growth picks."
+    ),
     limit: int = Query(24, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> dict:
@@ -125,18 +134,32 @@ def list_novels(
             where
         )
         fits = ctx.fits() if ctx.tested else {}
-        if (sort == "best" or band) and not fits:
+        given = {
+            "fit": w_fit,
+            "ease": w_ease,
+            "popularity": w_popularity,
+            "recent": w_recent,
+            "length": w_length,
+            "completed": w_completed,
+            "grow": w_grow,
+        }
+        # Any slider value means a custom mix; otherwise the named sort is a preset.
+        custom = {k: v for k, v in given.items() if v is not None}
+        weights = custom or PRESETS[sort]
+        needs_test = any(weights.get(k, 0) > 0 for k in NEEDS_TEST) or band
+        if needs_test and not fits:
             raise HTTPException(409, "take the placement test first")
-        if sort == "best" or band:
+        if custom or sort == "best" or band:
             rows = conn.execute(
                 f"SELECT {CARD_COLUMNS}{base} ORDER BY {SORTS['popularity']}", args
             ).fetchall()
-            ordered = _rank_for_me(ctx, rows, fits, band, best=sort == "best")
+            ordered = _rank_for_me(ctx, rows, fits, band, weights=weights)
             page = ordered[offset : offset + limit]
             items = []
             for row, grow in page:
                 card = _card(row)
-                card["me"] = {**_personal(fits.get(row["id"])), "grow": grow}
+                me = _personal(fits.get(row["id"]))
+                card["me"] = {**me, "grow": grow} if me else None
                 items.append(card)
             return {"total": len(ordered), "limit": limit, "offset": offset, "items": items}
         total = conn.execute("SELECT COUNT(*)" + base, args).fetchone()[0]
@@ -154,29 +177,66 @@ def list_novels(
         ctx.close()
 
 
-GROW_EVERY = 5  # one slot in five is a "grow" pick
-POPULARITY_WEIGHT = 0.01
-COMPLETED_BONUS = 0.005
+# How much each thing counts when ranking, 0 to 100 each. `grow` is the share of slots (percent)
+# given to words from your weakest domain; the others are summed as weight x a 0..1 factor.
+WEIGHT_KEYS = ("fit", "ease", "popularity", "recent", "length", "completed", "grow")
+PRESETS: dict[str, dict[str, float]] = {
+    "best": {"fit": 100, "popularity": 1, "completed": 0.5, "grow": 20},
+    "popularity": {"popularity": 100},
+    "easiest": {"ease": 100, "popularity": 1},
+    "updated": {"recent": 100},
+    "length": {"length": 100},
+}
+NEEDS_TEST = ("fit", "grow")
 
 
-def _rank_for_me(ctx, rows, fits, band, best: bool) -> list[tuple]:
-    """Order novels for this learner. Returns ``(row, is_grow_pick)`` pairs."""
-    rows = [r for r in rows if r["id"] in fits and (not band or fits[r["id"]].band == band)]
-    if not best:
-        return [(r, False) for r in rows]
-    if not band:
+def _percentiles(values: list) -> list[float]:
+    """Each value's place in the sorted list, 0 (lowest) to 1 (highest); None counts lowest."""
+    order = sorted(range(len(values)), key=lambda i: (values[i] is not None, values[i] or 0))
+    out = [0.0] * len(values)
+    for place, i in enumerate(order):
+        out[i] = place / (len(values) - 1) if len(values) > 1 else 1.0
+    return out
+
+
+def _rank_for_me(
+    ctx, rows, fits, band, best: bool = False, weights: dict[str, float] | None = None
+) -> list[tuple]:
+    """Order novels by the weights. Returns ``(row, is_grow_pick)`` pairs.
+
+    Rows come in popularity order, which settles ties. ``best=True`` uses the "best" preset.
+    """
+    w = {k: 0.0 for k in WEIGHT_KEYS}
+    w.update(PRESETS["best"] if best and weights is None else weights or {})
+    personal = w["fit"] > 0 or w["grow"] > 0 or bool(band)
+    if personal:
+        rows = [r for r in rows if r["id"] in fits and (not band or fits[r["id"]].band == band)]
+    if w["fit"] > 0 and not band:
         rows = [r for r in rows if fits[r["id"]].band != "too_hard"]
     top = max((r["points"] or 0 for r in rows), default=0) or 1
+    recent = _percentiles([r["last_up"] for r in rows]) if w["recent"] else []
+    longest = _percentiles([r["length_chars"] for r in rows]) if w["length"] else []
 
-    def score(row) -> float:
-        done = COMPLETED_BONUS if row["status"] == "completed" else 0.0
-        return (
-            -abs(fits[row["id"]].coverage - TARGET)
-            + POPULARITY_WEIGHT * (row["points"] or 0) / top
-            + done
-        )
+    def score(i: int, row) -> float:
+        total = 0.0
+        if w["fit"]:
+            total += w["fit"] * (1 - min(1.0, abs(fits[row["id"]].coverage - TARGET)))
+        if w["ease"]:
+            total += w["ease"] * (row["cover_3k"] or 0)
+        if w["popularity"]:
+            total += w["popularity"] * (row["points"] or 0) / top
+        if w["recent"]:
+            total += w["recent"] * recent[i]
+        if w["length"]:
+            total += w["length"] * longest[i]
+        if w["completed"] and row["status"] == "completed":
+            total += w["completed"]
+        return total
 
-    ordered = sorted(rows, key=score, reverse=True)
+    scored = sorted(enumerate(rows), key=lambda p: -score(*p))  # stable: ties keep popularity order
+    ordered = [row for _i, row in scored]
+    if w["grow"] <= 0 or not fits:
+        return [(r, False) for r in ordered]
     weak = weakest_domain(domain_strengths(ctx.catalog, ctx.learner))
     if weak is None:
         return [(r, False) for r in ordered]
@@ -190,11 +250,12 @@ def _rank_for_me(ctx, rows, fits, band, best: bool) -> list[tuple]:
     )
     grown = {r["id"] for r in pool}
     main = [r for r in ordered if r["id"] not in grown or len(pool) == 0]
+    share = min(w["grow"], 100) / 100
     result: list[tuple] = []
     queue = list(pool)
     main_iter = iter(main)
     for position in range(len(ordered)):
-        if position % GROW_EVERY == GROW_EVERY - 1 and queue:
+        if int((position + 1) * share + 1e-9) > int(position * share + 1e-9) and queue:
             result.append((queue.pop(0), True))
             continue
         nxt = next(main_iter, None)

@@ -13,7 +13,10 @@
 		type CollectStatus,
 		type Genre,
 		type NovelList,
-		type Sort
+		type Sort,
+		type Weights,
+		PRESETS,
+		WEIGHT_KEYS
 	} from '#lib/api';
 	import { BAND_HINT, BAND_LABEL, STATUS_LABEL, characters } from '#lib/format';
 
@@ -25,6 +28,16 @@
 		{ value: 'updated', label: 'Recently updated' },
 		{ value: 'length', label: 'Longest' }
 	];
+	const WEIGHT_LABELS: Record<keyof Weights, { label: string; hint: string }> = {
+		fit: { label: 'Fits my level', hint: 'Close to a comfortable stretch for you' },
+		ease: { label: 'Easy vocabulary', hint: 'The 3,000 most common words cover more of it' },
+		popularity: { label: 'Popular', hint: 'More Syosetu points' },
+		recent: { label: 'Recently updated', hint: 'Newer updates first' },
+		length: { label: 'Long', hint: 'Longer novels first' },
+		completed: { label: 'Completed', hint: 'A bonus for finished novels' },
+		grow: { label: 'Growth picks', hint: 'Share of slots for your weakest topic (percent)' }
+	};
+	const NEEDS_TEST = ['fit', 'grow'];
 	const LENGTHS = [
 		{ value: '', label: 'Any length', min: undefined, max: undefined },
 		{ value: 'short', label: 'Short story (under 20k)', min: undefined, max: 20_000 },
@@ -38,7 +51,7 @@
 	let completed = $state(false);
 	let showR15 = $state(false); // R15 works are hidden unless asked for
 	let minCover = $state(0);
-	let sort = $state<Sort>('popularity');
+	let weights = $state<Weights>({ ...PRESETS.popularity });
 	let band = $state<Band | ''>('');
 	let offset = $state(0);
 	let tested = $state(false); // the placement test has been taken
@@ -56,6 +69,15 @@
 	);
 	const sorts = $derived(tested ? SORTS : SORTS.filter((s) => s.value !== 'best'));
 	const defaultSort = $derived<Sort>(tested ? 'best' : 'popularity');
+	/** The drop-down shows a preset while the weights match it, and "Custom mix" otherwise. */
+	const sort = $derived<Sort | 'custom'>(
+		sorts.find((s) => WEIGHT_KEYS.every((k) => weights[k] === PRESETS[s.value][k]))?.value ??
+			'custom'
+	);
+	const setPreset = (value: string) => {
+		if (value in PRESETS) weights = { ...PRESETS[value as Sort] };
+		offset = 0;
+	};
 
 	onMount(async () => {
 		try {
@@ -72,7 +94,15 @@
 		minCover = Number(p.get('cover') ?? 0) || 0;
 		band = (['comfortable', 'stretch', 'hard', 'too_hard'].find((b) => b === p.get('band')) ??
 			'') as Band | '';
-		sort = (sorts.find((s) => s.value === p.get('sort'))?.value ?? defaultSort) as Sort;
+		const preset = (sorts.find((s) => s.value === p.get('sort'))?.value ?? defaultSort) as Sort;
+		weights = { ...PRESETS[preset] };
+		if (WEIGHT_KEYS.some((k) => p.has(`w_${k}`))) {
+			for (const k of WEIGHT_KEYS) {
+				const v = Number(p.get(`w_${k}`));
+				const ok = Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 0;
+				weights[k] = tested || !NEEDS_TEST.includes(k) ? ok : 0;
+			}
+		}
 		offset = Number(p.get('offset') ?? 0) || 0;
 		ready = true;
 		getGenres()
@@ -99,7 +129,17 @@
 			min_cover_3k: minCover > 0 ? minCover / 100 : undefined,
 			min_length: span?.min,
 			max_length: span?.max,
-			sort,
+			...(sort === 'custom'
+				? {
+						w_fit: weights.fit,
+						w_ease: weights.ease,
+						w_popularity: weights.popularity,
+						w_recent: weights.recent,
+						w_length: weights.length,
+						w_completed: weights.completed,
+						w_grow: weights.grow
+					}
+				: { sort }),
 			band: band || undefined,
 			limit: PAGE,
 			offset
@@ -111,7 +151,8 @@
 		if (completed) url.set('completed', '1');
 		if (showR15) url.set('r15', 'show');
 		if (minCover > 0) url.set('cover', String(minCover));
-		if (sort !== defaultSort) url.set('sort', sort);
+		if (sort === 'custom') for (const k of WEIGHT_KEYS) url.set(`w_${k}`, String(weights[k]));
+		else if (sort !== defaultSort) url.set('sort', sort);
 		if (band) url.set('band', band);
 		if (offset) url.set('offset', String(offset));
 		clearTimeout(timer);
@@ -133,6 +174,7 @@
 		band = '';
 		completed = showR15 = false;
 		minCover = offset = 0;
+		weights = { ...PRESETS[defaultSort] };
 	};
 	const last = $derived(list ? Math.min(list.offset + list.items.length, list.total) : 0);
 </script>
@@ -215,15 +257,16 @@
 		</select>
 	</label>
 	<label class="text-sm">
-		<span class="text-muted">Sort by</span>
+		<span class="text-muted">Sort by (preset)</span>
 		<select
-			bind:value={sort}
-			onchange={changed}
+			value={sort}
+			onchange={(e) => setPreset(e.currentTarget.value)}
 			class="mt-1 w-full rounded-lg border border-line bg-bg px-3 py-2"
 		>
 			{#each sorts as s (s.value)}
 				<option value={s.value}>{s.label}</option>
 			{/each}
+			{#if sort === 'custom'}<option value="custom">Custom mix</option>{/if}
 		</select>
 	</label>
 	{#if tested}
@@ -253,6 +296,34 @@
 			class="mt-2 w-full accent-accent"
 		/>
 	</label>
+	<details class="text-sm sm:col-span-2" open={sort === 'custom'}>
+		<summary class="cursor-pointer font-medium">Ranking weights</summary>
+		<p class="mt-1 text-muted">
+			How much each thing counts, 0 to 100. The sort preset above just sets these for you.
+		</p>
+		<div class="mt-2 grid gap-x-5 gap-y-2 sm:grid-cols-2">
+			{#each WEIGHT_KEYS as k (k)}
+				{@const off = !tested && NEEDS_TEST.includes(k)}
+				<label class={off ? 'opacity-50' : ''} title={off ? 'Take the placement test first' : ''}>
+					<span class="text-muted"
+						>{WEIGHT_LABELS[k].label}: <strong class="text-ink">{weights[k]}</strong></span
+					>
+					<input
+						type="range"
+						min="0"
+						max="100"
+						step="0.5"
+						disabled={off}
+						bind:value={weights[k]}
+						oninput={changed}
+						aria-describedby="hint-{k}"
+						class="mt-1 w-full accent-accent"
+					/>
+					<span id="hint-{k}" class="block text-xs text-muted">{WEIGHT_LABELS[k].hint}</span>
+				</label>
+			{/each}
+		</div>
+	</details>
 	<div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm sm:col-span-2">
 		<label class="flex items-center gap-2">
 			<input type="checkbox" bind:checked={completed} onchange={changed} class="accent-accent" />

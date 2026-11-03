@@ -116,6 +116,43 @@ export type CollectStatus = {
 
 export type Sort = 'best' | 'popularity' | 'easiest' | 'updated' | 'length';
 
+/** How much each thing counts in the ranking, 0 to 100. `grow` is the percent of slots for growth picks. */
+export type Weights = {
+	fit: number;
+	ease: number;
+	popularity: number;
+	recent: number;
+	length: number;
+	completed: number;
+	grow: number;
+};
+export const WEIGHT_KEYS = [
+	'fit',
+	'ease',
+	'popularity',
+	'recent',
+	'length',
+	'completed',
+	'grow'
+] as const;
+const NONE: Weights = {
+	fit: 0,
+	ease: 0,
+	popularity: 0,
+	recent: 0,
+	length: 0,
+	completed: 0,
+	grow: 0
+};
+/** The drop-down choices as weight sets. Keep in step with PRESETS in src/wn/api/routes/novels.py. */
+export const PRESETS: Record<Sort, Weights> = {
+	best: { ...NONE, fit: 100, popularity: 1, completed: 0.5, grow: 20 },
+	popularity: { ...NONE, popularity: 100 },
+	easiest: { ...NONE, ease: 100, popularity: 1 },
+	updated: { ...NONE, recent: 100 },
+	length: { ...NONE, length: 100 }
+};
+
 export type NovelQuery = {
 	q?: string;
 	genre?: string;
@@ -124,6 +161,13 @@ export type NovelQuery = {
 	min_cover_3k?: number;
 	sort?: Sort;
 	band?: Band;
+	w_fit?: number;
+	w_ease?: number;
+	w_popularity?: number;
+	w_recent?: number;
+	w_length?: number;
+	w_completed?: number;
+	w_grow?: number;
 	limit?: number;
 	offset?: number;
 };
@@ -131,7 +175,7 @@ export type NovelQuery = {
 function query(params: Record<string, string | number | boolean | undefined>): string {
 	const search = new URLSearchParams();
 	for (const [key, value] of Object.entries(params)) {
-		if (value === undefined || value === '' || value === false) continue;
+		if (value === undefined || value === '' || value === false) continue; // 0 is kept
 		search.set(key, String(value));
 	}
 	const text = search.toString();
