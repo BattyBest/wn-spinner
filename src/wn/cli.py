@@ -14,10 +14,12 @@ from .collector.http import CollectorError
 from .collector.session import open_session
 from .config import DEFAULT_DELAY, POLICIES, ROBOTS_TOKEN, data_dir, policy_for
 from .db import open_catalog
+from .syosetu.cli import app as syosetu_app
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="wn-spinner command line.")
 cache_app = typer.Typer(no_args_is_help=True, help="Inspect or clear the page cache.")
 app.add_typer(cache_app, name="cache")
+app.add_typer(syosetu_app, name="syosetu")
 
 
 @asynccontextmanager
@@ -132,6 +134,19 @@ def cache_purge(
     finally:
         conn.close()
     typer.echo(f"removed {removed} cached pages")
+
+
+@app.command()
+def analyse() -> None:
+    """Recompute word-frequency ranks and every novel's statistics from stored counts."""
+    from .analysis.store import rebuild_all
+
+    conn = open_catalog(data_dir())
+    try:
+        ranked, scored = rebuild_all(conn)
+    finally:
+        conn.close()
+    typer.echo(f"ranked {ranked} words; recomputed statistics for {scored} novels")
 
 
 @app.command()
