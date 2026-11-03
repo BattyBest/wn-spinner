@@ -171,14 +171,21 @@ def load_jmdict(conn: sqlite3.Connection, path: Path, now: float | None = None) 
             "INSERT OR IGNORE INTO dict_form (language, form, entry_id) VALUES ('ja', ?, ?)", forms
         )
         conn.execute(
-            "UPDATE lemma SET gloss = NULL, dict_id = NULL, tags = NULL WHERE language = 'ja'"
+            "UPDATE lemma SET gloss = NULL, dict_id = NULL, tags = NULL, is_common = NULL"
+            " WHERE language = 'ja'"
         )
         matched = 0
         for form, (_key, entry) in best.items():
             for lemma_id in wanted[form]:
                 conn.execute(
-                    "UPDATE lemma SET gloss = ?, dict_id = ?, tags = ? WHERE id = ?",
-                    (entry_gloss(entry) or None, int(entry["id"]), entry_tags(entry), lemma_id),
+                    "UPDATE lemma SET gloss = ?, dict_id = ?, tags = ?, is_common = ? WHERE id = ?",
+                    (
+                        entry_gloss(entry) or None,
+                        int(entry["id"]),
+                        entry_tags(entry),
+                        int(entry_common(entry)),
+                        lemma_id,
+                    ),
                 )
                 matched += 1
         conn.execute(

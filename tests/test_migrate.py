@@ -8,7 +8,7 @@ from wn.db.migrate import current_version, migrate
 
 def test_fresh_databases_are_created_and_seeded(tmp_path):
     catalog, profile = open_catalog(tmp_path), open_profile(tmp_path)
-    assert current_version(catalog) == 4
+    assert current_version(catalog) == 5
     assert current_version(profile) == 2
     names = [r[0] for r in catalog.execute("SELECT name FROM source ORDER BY name")]
     assert names == ["jjwxc", "syosetu"]
@@ -91,7 +91,7 @@ def test_migration_4_carries_japanese_data_over(tmp_path):
     conn.execute("INSERT INTO jlpt_word (lemma, reading, level) VALUES ('魔法', 'まほう', 4)")
     conn.execute("INSERT INTO dict_form (form, entry_id) VALUES ('魔法', 1)")
     conn.commit()
-    assert migrate(conn, folder, backup_dir=tmp_path / "backups") == 4
+    assert migrate(conn, folder, backup_dir=tmp_path / "backups") == 5
     assert conn.execute("SELECT language, lemma, level FROM level_word").fetchall() == [
         ("ja", "魔法", 4)
     ]

@@ -7,6 +7,7 @@ import time
 from collections import defaultdict
 
 from .. import lang as languages
+from ..learner import difficulty
 from .japanese import ANALYSER_VERSION, TextAnalysis
 
 COVER_STEPS = (1_000, 2_000, 3_000, 5_000, 10_000)
@@ -208,6 +209,7 @@ def rebuild_all(conn: sqlite3.Connection, lang: str | None = None) -> tuple[int,
     ranked = done = 0
     for code in [lang] if lang else languages.CODES:
         ranked += rebuild_frequency(conn, code)
+        difficulty.rebuild(conn, code)
         ids = [
             r[0]
             for r in conn.execute(

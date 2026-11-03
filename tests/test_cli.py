@@ -97,3 +97,30 @@ def test_syosetu_sample_dry_run_sends_nothing(tmp_path, monkeypatch):
         assert result.exit_code == 0, result.output
         assert "novels to read:  4" in result.output
         assert len(router.calls) == calls_before
+
+
+def test_analyse_refits_a_saved_model(tmp_path, monkeypatch):
+    from wn.db import open_catalog, open_profile
+
+    from .synthetic import build
+
+    monkeypatch.setenv("WN_DATA_DIR", str(tmp_path))
+    catalog, profile = open_catalog(tmp_path), open_profile(tmp_path)
+    ids = build(catalog)
+    lemma = catalog.execute(
+        "SELECT lemma, pos FROM lemma WHERE id = ?", (ids["lemmas"][3],)
+    ).fetchone()
+    with profile:
+        profile.execute(
+            "INSERT INTO answer (language, kind, lemma, pos, known, weight, at)"
+            " VALUES ('ja', 'word', ?, ?, 1, 1.0, 1.0)",
+            (lemma[0], lemma[1]),
+        )
+        profile.execute(
+            "INSERT INTO model (language, version, params, guess_rate, answers, fitted_at)"
+            " VALUES ('ja', 2, '{\"theta\": [5.0, 1.0], \"domains\": {}}', 0.1, 0, 1.0)"
+        )
+    result = runner.invoke(app, ["analyse", "--lang", "ja"])
+    assert result.exit_code == 0, result.output
+    assert "refitted your model from 1 answers" in result.output
+    assert open_profile(tmp_path).execute("SELECT answers FROM model").fetchone()[0] == 1

@@ -16,6 +16,7 @@ from .config import DEFAULT_DELAY, POLICIES, ROBOTS_TOKEN, data_dir, policy_for
 from .db import open_catalog
 from .jjwxc.cli import app as jjwxc_app
 from .learner.cli import app as dict_app
+from .learner.model_cli import app as model_app
 from .syosetu.cli import app as syosetu_app
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="wn-spinner command line.")
@@ -24,6 +25,7 @@ app.add_typer(cache_app, name="cache")
 app.add_typer(syosetu_app, name="syosetu")
 app.add_typer(jjwxc_app, name="jjwxc")
 app.add_typer(dict_app, name="dict")
+app.add_typer(model_app, name="model")
 
 
 @asynccontextmanager
@@ -150,7 +152,9 @@ def analyse(
     """Recompute word-frequency ranks and every novel's statistics from stored counts."""
     from . import lang as languages
     from .analysis.store import rebuild_all
+    from .db import open_profile
     from .learner.domains import rebuild_domains
+    from .learner.model import refit_languages
 
     if lang is not None and lang not in languages.CODES:
         raise _fail(f"--lang must be one of: {', '.join(languages.CODES)}")
@@ -169,6 +173,11 @@ def analyse(
                 for key, members in report.groups.items():
                     note = "  (too few novels, skipped)" if key in report.skipped else ""
                     typer.echo(f"  {key:<9} {members:>4} novels{note}")
+        # The ranks and domains just changed, so the saved fits no longer match them.
+        for code, answers in refit_languages(
+            open_profile(data_dir()), conn, [lang] if lang else list(languages.CODES)
+        ).items():
+            typer.echo(f"{languages.get(code).name}: refitted your model from {answers} answers")
     finally:
         conn.close()
 

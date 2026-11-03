@@ -288,3 +288,23 @@ def test_personal_weights_need_the_test(untested):
     assert client.get("/api/novels?w_fit=50").status_code == 409
     assert client.get("/api/novels?w_grow=10").status_code == 409
     assert client.get("/api/novels?w_popularity=50&w_length=50").status_code == 200
+
+
+def test_a_domain_fix_refits_the_model(tested):
+    client, ids, root = tested
+    profile = open_profile(root)
+    profile.execute("UPDATE model SET fitted_at = 1.0")
+    profile.commit()
+    client.put(
+        "/api/words/domains",
+        json={"lemma_id": ids["lemmas"][5], "domain": "crime", "action": "add"},
+    )
+    assert open_profile(root).execute("SELECT fitted_at FROM model").fetchone()[0] > 1.0
+
+
+def test_vocabulary_is_the_expected_number_of_known_words_with_a_range(tested):
+    client, *_ = tested
+    profile = client.get("/api/profile").json()
+    low, high = profile["vocabulary_range"]
+    assert low < profile["vocabulary"] < high
+    assert profile["vocabulary_rank"] > 0  # where the learner stands at 50%, for reference
