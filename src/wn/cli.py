@@ -6,13 +6,13 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 import typer
 
 from . import __version__
 from .collector import Cache, Collector
 from .collector.http import CollectorError
-from .config import DEFAULT_DELAY, POLICIES, ROBOTS_TOKEN, USER_AGENT, data_dir, policy_for
+from .collector.session import open_session
+from .config import DEFAULT_DELAY, POLICIES, ROBOTS_TOKEN, data_dir, policy_for
 from .db import open_catalog
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="wn-spinner command line.")
@@ -22,13 +22,8 @@ app.add_typer(cache_app, name="cache")
 
 @asynccontextmanager
 async def _collector() -> AsyncIterator[Collector]:
-    root = data_dir()
-    conn = open_catalog(root)
-    try:
-        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}) as client:
-            yield Collector(conn, Cache(conn, root / "cache"), client)
-    finally:
-        conn.close()
+    async with open_session() as session:
+        yield session.collector
 
 
 def _fail(message: str) -> typer.Exit:
