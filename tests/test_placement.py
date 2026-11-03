@@ -102,8 +102,9 @@ def test_full_test_flow(world):
     assert profile["tested"] and profile["answers"] > 60
     assert 70 < profile["vocabulary"] < 200  # true value 120
     by_key = {d["key"]: d for d in profile["domains"]}
-    assert by_key["fantasy"]["delta"] > 0.5 > -0.5 > by_key["money"]["delta"]  # true +1.2, -1.0
-    assert by_key["fantasy"]["delta_sd"] < 0.8  # less uncertain than the prior
+    # True +1.2 and -1.0. The domain prior is tight (sd 0.5) so one test only goes part way.
+    assert by_key["fantasy"]["delta"] > 0.25 > -0.25 > by_key["money"]["delta"], by_key
+    assert by_key["fantasy"]["delta_sd"] < 0.5  # less uncertain than the prior
 
 
 def test_the_model_asks_where_it_is_unsure(world):

@@ -189,7 +189,8 @@ def domain_strengths(catalog: sqlite3.Connection, learner: Learner) -> list[dict
                 )
                 lex = learner.lexicon
                 return sum(
-                    p_know(shifted, lex.rank_of(i), lex.weights.get(i, [])) for i in ids
+                    p_know(shifted, lex.rank_of(i), lex.weights.get(i, []), lex.sd_of(i))
+                    for i in ids
                 ) / len(ids)
 
             entry["share"] = share(0.0)

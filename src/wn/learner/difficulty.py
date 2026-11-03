@@ -135,3 +135,93 @@ def blend(
         return Estimate(unknown, UNKNOWN_SD)
     variance = 1 / total
     return Estimate(weighted / total + DENSITY_SLOPE * variance, math.sqrt(variance))
+
+
+# --- the catalog's side ---------------------------------------------------------------------
+
+
+def _half_ranks(conn, lang: str, novel_ids: set[int]) -> dict[int, float]:
+    """ln rank of each lemma, ranked as ``rebuild_frequency`` does but over some novels."""
+    from ..analysis.store import _novel_rows, is_name
+
+    totals: dict[int, int] = defaultdict(int)
+    kept = []
+    for row in _novel_rows(conn, lang):
+        if row["novel_id"] in novel_ids and not is_name(row, lang):
+            totals[row["novel_id"]] += row["count"]
+            kept.append((row["novel_id"], row["lemma_id"], row["count"]))
+    score: dict[int, float] = defaultdict(float)
+    for novel_id, lemma_id, n in kept:
+        score[lemma_id] += n / totals[novel_id] / (len(totals) or 1)
+    ordered = sorted(score, key=lambda i: (-score[i], i))
+    return {lemma_id: math.log(rank) for rank, lemma_id in enumerate(ordered, start=1)}
+
+
+def measure_noise(conn, lang: str, counts: dict[int, int]) -> Noise:
+    """How noisy the catalog's ranks are, from ranking twice over alternate novels."""
+    novels = sorted({r[0] for r in conn.execute("SELECT DISTINCT novel_id FROM novel_stats")})
+    if len(novels) < 4:
+        return DEFAULT_NOISE
+    first = _half_ranks(conn, lang, set(novels[0::2]))
+    second = _half_ranks(conn, lang, set(novels[1::2]))
+    return fit_noise(
+        (counts[i], first[i], second[i]) for i in first.keys() & second.keys() if i in counts
+    )
+
+
+def rebuild(conn, lang: str, now: float | None = None) -> dict:
+    """Recompute every lemma's blended difficulty. Run after ``rebuild_frequency``."""
+    import json
+    import time
+
+    rows = conn.execute(
+        "SELECT id, lemma, corpus_count, corpus_rank, is_common FROM lemma WHERE language = ?",
+        (lang,),
+    ).fetchall()
+    ranked = [r for r in rows if r["corpus_rank"]]
+    if not ranked:
+        return {"words": 0, "noise": DEFAULT_NOISE, "sources": {}}
+    ln_rank = {r["id"]: math.log(r["corpus_rank"]) for r in ranked}
+    counts = {r["id"]: r["corpus_count"] or 0 for r in ranked}
+    top = math.log(max(r["corpus_rank"] for r in ranked) * 1.5)
+    noise = measure_noise(conn, lang, counts)
+
+    # Level lists: a lemma gets its list's level; a lemma in two lists keeps the easier one.
+    levels: dict[str, str] = {}
+    for word, level in conn.execute(
+        "SELECT lemma, level FROM level_word WHERE language = ?", (lang,)
+    ):
+        levels[word] = str(level)
+    level_label = {r["id"]: levels[r["lemma"]] for r in rows if r["lemma"] in levels}
+    common_label = {r["id"]: str(r["is_common"]) for r in rows if r["is_common"] is not None}
+    sources = [
+        calibrate("level", level_label, ln_rank, counts, noise),
+        calibrate("common", common_label, ln_rank, counts, noise),
+    ]
+
+    updates = []
+    for r in rows:
+        catalog = (ln_rank[r["id"]], counts[r["id"]]) if r["id"] in ln_rank else None
+        outside = [(sources[0], level_label.get(r["id"])), (sources[1], common_label.get(r["id"]))]
+        if catalog is None and not any(label for _, label in outside):
+            updates.append((None, None, r["id"]))
+            continue
+        est = blend(catalog, outside, top, noise)
+        updates.append((est.ln_rank, est.sd, r["id"]))
+    report = {
+        "noise": {"v0": noise.v0, "v1": noise.v1},
+        "sources": {s.name: {"labels": len(s.mean), "sd": math.sqrt(s.variance)} for s in sources},
+    }
+    with conn:
+        conn.executemany("UPDATE lemma SET difficulty = ?, difficulty_sd = ? WHERE id = ?", updates)
+        conn.execute(
+            "INSERT OR REPLACE INTO dict_meta (name, version, source, sha256, entries, loaded_at)"
+            " VALUES (?, NULL, ?, NULL, ?, ?)",
+            (
+                f"difficulty-{lang}",
+                json.dumps(report),
+                sum(1 for u in updates if u[0] is not None),
+                time.time() if now is None else now,
+            ),
+        )
+    return {"words": sum(1 for u in updates if u[0] is not None), **report}

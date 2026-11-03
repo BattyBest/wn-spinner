@@ -17,7 +17,7 @@ import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from . import difficulty, estimate, model
+from . import difficulty, model
 
 BANDS = ((1, 300), (300, 1500), (1500, 5000), (5000, 20000))
 WORDS = 20000
@@ -154,12 +154,38 @@ class Scheme:
     choose: Callable[[World, model.Params, set[int], random.Random], int]
 
 
+LEGACY_SLOPE = 1.5  # the model before version 2: a fixed slope, a theta-only fit here
+
+
+def _legacy_fit(obs: list[model.Observation], guess: float) -> model.Params:
+    """Version 1 of the fit, kept so the benchmark can still compare against it."""
+    prior_mean, prior_sd = model.THETA_PRIOR
+    theta = prior_mean
+    info = 1 / prior_sd**2
+    for _ in range(40):
+        grad = -(theta - prior_mean) / prior_sd**2
+        info = 1 / prior_sd**2
+        for o in obs:
+            p = model.sigmoid(LEGACY_SLOPE * (theta - o.offset))
+            q = min(max(o.guess + (1 - o.guess) * p, 1e-6), 1 - 1e-6)
+            dq = (1 - o.guess) * p * (1 - p) * LEGACY_SLOPE
+            grad += o.weight * (1 / q if o.known else -1 / (1 - q)) * dq
+            info += o.weight * dq * dq / (q * (1 - q))
+        step = grad / info
+        theta += max(-1.0, min(1.0, step))
+        if abs(step) < 1e-5:
+            break
+    return model.Params(theta=theta, theta_sd=math.sqrt(1 / info), guess_rate=guess)
+
+
 def baseline_scheme(world: World) -> Scheme:
+    """The model as it was before version 2: ln of the catalog rank, a fixed slope of 1.5."""
+
     def difficulty(w: World, i: int) -> float:
         return w.observed[i]
 
     def predict(params: model.Params, i: int) -> float:
-        return model.sigmoid(model.SLOPE * (params.theta - world.observed[i]))
+        return model.sigmoid(LEGACY_SLOPE * (params.theta - world.observed[i]))
 
     def choose(w: World, params: model.Params, asked: set[int], rng: random.Random) -> int:
         order = sorted(
@@ -168,10 +194,7 @@ def baseline_scheme(world: World) -> Scheme:
         )
         return rng.choice(order[:5])
 
-    def fit(obs: list[model.Observation], guess: float) -> model.Params:
-        return model.fit(obs, guess, len(obs))
-
-    return Scheme("current", difficulty, fit, predict, choose)
+    return Scheme("before version 2", difficulty, _legacy_fit, predict, choose)
 
 
 def run_learner(
@@ -236,10 +259,9 @@ def report(name: str, score: Score) -> str:
 
 
 def compare(learners: int = 100, seed: int = 1, words: int = WORDS) -> str:
-    from functools import partial
 
     out = []
-    for make in (baseline_scheme, partial(improved_scheme, anchors=False)):
+    for make in (baseline_scheme, improved_scheme):
         out.append(report(*run(learners, seed, make, words)))
     return "\n\n".join(out)
 
@@ -247,11 +269,10 @@ def compare(learners: int = 100, seed: int = 1, words: int = WORDS) -> str:
 def improved_scheme(
     world: World,
     blend: bool = True,
-    anchors: bool = True,
     use_sd: bool = True,
     fit_noise: bool = True,
 ) -> Scheme:
-    """Blended difficulty, a fitted slope, and anchor words in the test."""
+    """Blended difficulty with its uncertainty, and a fitted slope."""
     noise = difficulty.fit_noise(world.splits) if fit_noise else difficulty.DEFAULT_NOISE
     ln_rank = dict(enumerate(world.observed))
     seen = dict(enumerate(world.sightings))
@@ -279,24 +300,24 @@ def improved_scheme(
     def difficulty_of(w: World, i: int) -> float:
         return blended[i].ln_rank
 
-    def fit(obs: list[model.Observation], guess: float) -> estimate.Fit:
-        # The bench's observations carry the word's difficulty as the offset; recover its sd
-        # from the same table by matching the offset (unique per word in practice).
-        rows = [
-            estimate.Obs(o.features, o.offset, sd_by_offset[o.offset], o.known, o.weight, o.guess)
-            for o in obs
-        ]
-        return estimate.fit(rows, 0)
-
     sd_by_offset = {e.ln_rank: e.sd for e in blended}
 
-    def predict(params: estimate.Fit, i: int) -> float:
-        return estimate.p_word(params.beta[0], params.slope, 0.0, blended[i].ln_rank, blended[i].sd)
+    def fit(obs: list[model.Observation], guess: float) -> model.Params:
+        # The bench's observations carry the word's difficulty as the offset; the sd comes
+        # from the same table (unique per word in practice).
+        rows = [
+            model.Observation(
+                o.features, o.offset, o.known, o.weight, o.guess, sd_by_offset[o.offset]
+            )
+            for o in obs
+        ]
+        return model.fit(rows, guess, len(rows))
 
-    def choose(w: World, params: estimate.Fit, asked: set[int], rng: random.Random) -> int:
+    def predict(params: model.Params, i: int) -> float:
+        return model.p_know(params, math.exp(blended[i].ln_rank), [], blended[i].sd)
+
+    def choose(w: World, params: model.Params, asked: set[int], rng: random.Random) -> int:
         target = 0.5
-        if anchors and len(asked) % 10 == 9:  # an anchor: far enough from 50% to tell the slope
-            target = 0.85 if (len(asked) // 10) % 2 == 0 else 0.15
         order = sorted(
             (i for i in range(len(w.truth)) if i not in asked),
             key=lambda i: abs(predict(params, i) - target),
@@ -304,6 +325,54 @@ def improved_scheme(
         return rng.choice(order[:5])
 
     return Scheme("improved", difficulty_of, fit, predict, choose)
+
+
+# --- a check on a real profile ----------------------------------------------------------------
+
+
+def _claim(p: float, guess: float) -> float:
+    return guess + (1 - guess) * p
+
+
+def check(profile, catalog, lang: str = "ja", folds: int = 5) -> str:
+    """Hold out your own answers and marks, and compare how well each model predicts them.
+
+    Both models are refitted on the other folds. "Before version 2" uses the raw catalog rank
+    and a fixed slope of 1.5, and ignores domains; the new model uses the blended difficulty,
+    a fitted slope and the domain offsets. Nothing leaves this machine.
+    """
+    new_lex = model.Lexicon.load(catalog, model.load_fixes(profile, lang), lang)
+    old_lex = model.Lexicon.load(catalog, model.load_fixes(profile, lang), lang)
+    old_lex.difficulty.clear()
+    old_lex.spread.clear()
+    new_obs, guess, _ = model.observations(profile, new_lex)
+    old_obs, _guess, _ = model.observations(profile, old_lex)
+    if len(new_obs) < folds * 10:
+        return f"only {len(new_obs)} answers and marks so far; take the placement test first"
+    order = list(range(len(new_obs)))
+    random.Random(1).shuffle(order)
+    old_score, new_score = Score(), Score()
+    for fold in range(folds):
+        held = set(order[fold::folds])
+        train = [i for i in range(len(new_obs)) if i not in held]
+        params = model.fit([new_obs[i] for i in train], guess, len(train))
+        legacy = _legacy_fit([old_obs[i] for i in train], guess)
+        for i in held:
+            o, b = new_obs[i], old_obs[i]
+            if o.guess >= 1 or o.weight < 1:  # leave out the faint "untapped" evidence
+                continue
+            x = sum(v * ([params.theta] + list(params.deltas.values()))[k] for k, v in o.features)
+            p_new = model.sigmoid(model.effective_slope(params.slope, o.sd) * (x - o.offset))
+            p_old = model.sigmoid(LEGACY_SLOPE * (legacy.theta - b.offset))
+            for score, p, obs in ((new_score, p_new, o), (old_score, p_old, b)):
+                score.add(math.exp(obs.offset), _claim(p, obs.guess), obs.known)
+    return "\n\n".join(
+        [
+            "Held-out answers and marks, 5-fold; 'predicted' is the chance of the answer given.",
+            report("before version 2", old_score),
+            report("version 2", new_score),
+        ]
+    )
 
 
 if __name__ == "__main__":

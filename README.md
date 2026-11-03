@@ -85,6 +85,8 @@ uv run wn analyse --domains               # tag words with domains (after each c
 uv run wn syosetu excerpts                # keep short passages for the test (one page per novel)
 uv run wn jjwxc excerpts                  # the same for Chinese
 uv run wn dict status                     # what is loaded
+uv run wn model bench                      # score the learner model on simulated learners
+uv run wn model check                      # hold out your own answers and marks, old model vs new
 ```
 
 Then open the Test screen. It needs a catalog of a couple of hundred novels (a frequency list

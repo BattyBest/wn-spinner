@@ -13,7 +13,7 @@ from fastapi import Request
 
 from ..db import open_catalog, open_profile
 from ..learner.coverage import NovelFit, novel_fits
-from ..learner.model import Learner, Lexicon, load_fixes, load_params, load_status
+from ..learner.model import Learner, Lexicon, current_params, load_fixes, load_status
 from ..learner.placement import Pool
 
 
@@ -92,5 +92,5 @@ def open_context(request: Request, lang: str = "ja") -> Context:
     lexicon: Lexicon = _cached(
         request, key, lambda: Lexicon.load(catalog, load_fixes(profile, lang), lang)
     )
-    learner = Learner(load_params(profile, lang), lexicon, load_status(profile, lang))
+    learner = Learner(current_params(profile, lexicon), lexicon, load_status(profile, lang))
     return Context(profile, catalog, learner, request, lang)

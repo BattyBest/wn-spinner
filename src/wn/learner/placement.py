@@ -12,6 +12,7 @@ you tap the words you don't know, rate your understanding and answer one cloze q
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 import sqlite3
@@ -59,7 +60,8 @@ class Candidate:
     pos: str
     reading: str | None
     gloss: str
-    rank: int
+    rank: int  # effective rank: the blended difficulty where known, else the catalog rank
+    sd: float = 0.0
 
 
 @dataclass
@@ -76,7 +78,8 @@ class Pool:
         content_pos = languages.get(lang).content_pos
         marks = ",".join("?" * len(content_pos))
         rows = catalog.execute(
-            "SELECT l.id, l.lemma, l.pos, l.reading, l.gloss, l.corpus_rank FROM lemma l"
+            "SELECT l.id, l.lemma, l.pos, l.reading, l.gloss, l.corpus_rank, l.difficulty,"
+            " l.difficulty_sd FROM lemma l"
             " WHERE l.language = ? AND l.gloss IS NOT NULL AND l.corpus_rank IS NOT NULL"
             f" AND l.is_function = 0 AND l.pos IN ({marks})"
             " AND (SELECT COUNT(*) FROM novel_lemma nl"
@@ -87,8 +90,15 @@ class Pool:
             # A one-character Japanese word is fine in kanji; Chinese test words have two or more.
             if len(r["lemma"]) < 2 and (lang == "zh" or not _KANJI.match(r["lemma"])):
                 continue
+            blended = r["difficulty"]
             pool.words[r["id"]] = Candidate(
-                r["id"], r["lemma"], r["pos"], r["reading"], r["gloss"], r["corpus_rank"]
+                r["id"],
+                r["lemma"],
+                r["pos"],
+                r["reading"],
+                r["gloss"],
+                round(math.exp(blended)) if blended is not None else r["corpus_rank"],
+                (r["difficulty_sd"] or 0.0) if blended is not None else 0.0,
             )
         pool.forms = {
             r[0] for r in catalog.execute("SELECT form FROM dict_form WHERE language = ?", (lang,))
@@ -226,7 +236,7 @@ def choose_word(state: dict, learner: Learner, pool: Pool, rng: random.Random) -
         key = None
     chosen = sorted(
         in_domain[key],
-        key=lambda c: abs(p_know(params, c.rank, lex.weights.get(c.lemma_id, [])) - 0.5),
+        key=lambda c: abs(p_know(params, c.rank, lex.weights.get(c.lemma_id, []), c.sd) - 0.5),
     )[:NEAREST]
     return _visible_word(rng.choice(chosen), key)
 

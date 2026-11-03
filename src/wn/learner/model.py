@@ -1,9 +1,13 @@
 """The learner model: how likely you are to know a word, and how it is fitted.
 
-    P(know w) = sigmoid(a * (theta + sum_d m[w,d] * delta[d] - ln rank[w]))
+    P(know w) = sigmoid(a_eff * (theta + sum_d m[w,d] * delta[d] - b[w]))
+    a_eff = a / sqrt(1 + (pi / 8) * a^2 * s[w]^2)
 
 ``theta`` is general ability (``e ** theta`` reads as a vocabulary size), ``delta[d]`` is
-strength in domain ``d`` and ``m[w,d]`` how much the word belongs to it. The fit is a
+strength in domain ``d`` and ``m[w,d]`` how much the word belongs to it (the weights of one
+word sum to at most 1). ``b[w]`` is the word's difficulty in ``ln rank`` units and ``s[w]`` how
+unsure we are of it (see difficulty.py); the more unsure, the flatter the curve, so a surprise
+on a poorly ranked word blames the word, not the learner. The slope ``a`` is fitted. The fit is a
 maximum-a-posteriori estimate with Gaussian priors, found by Fisher scoring; the inverse of
 the final information matrix gives each parameter's uncertainty. It is a handful of
 parameters and a few hundred answers, so plain Python is fast enough.
@@ -22,14 +26,17 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 
+from .difficulty import UNKNOWN_SD
 from .domains import DOMAIN_KEYS
 
-SLOPE = 1.5
+SLOPE = 3.0  # the prior for the slope; each learner's own is fitted
+SLOPE_PRIOR_SD = 0.35  # of ln slope
+LOGISTIC_NORMAL = math.pi / 8
 THETA_PRIOR = (math.log(1500), 1.5)
-DELTA_PRIOR_SD = 0.8
+DELTA_PRIOR_SD = 0.5
 MEANING_GUESS = 0.25
 FAKE_PRIOR = (0.5, 5.0)  # pseudo "yes" and pseudo answers for the guess rate
-MODEL_VERSION = 1
+MODEL_VERSION = 2
 
 # Weight of each kind of evidence; see the plan's table.
 WEIGHTS = {"word": 1.0, "meaning": 2.0, "tap": 1.0, "untapped": 0.3, "mark": 1.0}
@@ -49,6 +56,7 @@ class Observation:
     known: bool
     weight: float
     guess: float  # chance of this answer being right with no knowledge
+    sd: float = 0.0  # uncertainty of the word's difficulty
 
 
 @dataclass
@@ -61,6 +69,8 @@ class Params:
     )
     guess_rate: float = FAKE_PRIOR[0] / FAKE_PRIOR[1]
     answers: int = 0
+    slope: float = SLOPE
+    slope_sd: float = SLOPE_PRIOR_SD  # of ln slope
 
     def vocabulary(self) -> int:
         return round(math.exp(self.theta))
@@ -69,6 +79,7 @@ class Params:
         return json.dumps(
             {
                 "theta": [self.theta, self.theta_sd],
+                "slope": [math.log(self.slope), self.slope_sd],
                 "domains": {k: [self.deltas[k], self.delta_sds[k]] for k in DOMAIN_KEYS},
             }
         )
@@ -78,18 +89,26 @@ class Params:
         data = json.loads(text)
         out = cls(guess_rate=guess_rate, answers=answers)
         out.theta, out.theta_sd = data["theta"]
+        if "slope" in data:  # fits from before version 2 have none
+            log_slope, out.slope_sd = data["slope"]
+            out.slope = math.exp(log_slope)
         for key, (mean, sd) in data["domains"].items():
             if key in out.deltas:
                 out.deltas[key], out.delta_sds[key] = mean, sd
         return out
 
 
-def p_know(params: Params, rank: float, weights: list[tuple[str, float]]) -> float:
-    """Chance of knowing a word of this frequency rank and domain weights."""
+def effective_slope(slope: float, sd: float) -> float:
+    """The slope to use for a word whose difficulty is only known to within ``sd``."""
+    return slope / math.sqrt(1 + LOGISTIC_NORMAL * slope**2 * sd**2)
+
+
+def p_know(params: Params, rank: float, weights: list[tuple[str, float]], sd: float = 0.0) -> float:
+    """Chance of knowing a word of this difficulty (an effective rank) and domain weights."""
     x = params.theta - math.log(max(rank, 1.0))
     for domain, m in weights:
         x += m * params.deltas.get(domain, 0.0)
-    return sigmoid(SLOPE * x)
+    return sigmoid(effective_slope(params.slope, sd) * x)
 
 
 def solve(matrix: list[list[float]], rhs: list[float]) -> list[float]:
@@ -123,27 +142,34 @@ def guess_rate(fake_yes: int, fakes: int) -> float:
 
 
 def fit(observations: list[Observation], guess: float | None = None, answers: int = 0) -> Params:
-    """Maximum-a-posteriori fit of theta and the domain offsets."""
+    """Maximum-a-posteriori fit of theta, the domain offsets and the slope (Fisher scoring)."""
     keys = list(DOMAIN_KEYS)
-    n = 1 + len(keys)
-    mean0 = [THETA_PRIOR[0]] + [0.0] * len(keys)
-    prec = [1 / THETA_PRIOR[1] ** 2] + [1 / DELTA_PRIOR_SD**2] * len(keys)
+    n = 1 + len(keys) + 1  # theta, the domains, then ln slope
+    last = n - 1
+    mean0 = [THETA_PRIOR[0]] + [0.0] * len(keys) + [math.log(SLOPE)]
+    prec = [1 / THETA_PRIOR[1] ** 2] + [1 / DELTA_PRIOR_SD**2] * len(keys) + [1 / SLOPE_PRIOR_SD**2]
     beta = mean0[:]
     info = [[0.0] * n for _ in range(n)]
     for _ in range(40):
         grad = [-prec[i] * (beta[i] - mean0[i]) for i in range(n)]
         info = [[prec[i] if i == j else 0.0 for j in range(n)] for i in range(n)]
+        slope = math.exp(beta[last])
         for o in observations:
             x = sum(beta[i] * v for i, v in o.features) - o.offset
-            p = sigmoid(SLOPE * x)
+            shrink = 1 + LOGISTIC_NORMAL * slope**2 * o.sd**2
+            a_eff = slope / math.sqrt(shrink)
+            p = sigmoid(a_eff * x)
             q = min(max(o.guess + (1 - o.guess) * p, 1e-6), 1 - 1e-6)
-            dq = (1 - o.guess) * p * (1 - p) * SLOPE  # dq / dx
-            slope = o.weight * ((1 / q if o.known else -1 / (1 - q)) * dq)
+            dq = (1 - o.guess) * p * (1 - p)  # dq / dz, where z = a_eff * x
+            # dz / d(parameter): a_eff * feature for theta and the domains, and for ln slope:
+            direction = {i: a_eff * v for i, v in o.features}
+            direction[last] = x * slope * shrink**-1.5
+            score = o.weight * ((1 / q if o.known else -1 / (1 - q)) * dq)
             fisher = o.weight * dq * dq / (q * (1 - q))
-            for i, vi in o.features:
-                grad[i] += slope * vi
-                for j, vj in o.features:
-                    info[i][j] += fisher * vi * vj
+            for i, gi in direction.items():
+                grad[i] += score * gi
+                for j, gj in direction.items():
+                    info[i][j] += fisher * gi * gj
         step = solve(info, grad)
         biggest = max(abs(s) for s in step)
         scale = min(1.0, 1.0 / biggest) if biggest > 0 else 1.0
@@ -157,6 +183,8 @@ def fit(observations: list[Observation], guess: float | None = None, answers: in
         deltas={k: beta[1 + i] for i, k in enumerate(keys)},
         delta_sds={k: math.sqrt(max(cov[1 + i][1 + i], 0.0)) for i, k in enumerate(keys)},
         answers=answers,
+        slope=math.exp(beta[last]),
+        slope_sd=math.sqrt(max(cov[last][last], 0.0)),
     )
     if guess is not None:
         params.guess_rate = guess
@@ -178,11 +206,23 @@ class Lexicon:
     keys: dict[int, tuple[str, str]] = field(default_factory=dict)
     max_rank: int = 1
     lang: str = "ja"
+    difficulty: dict[int, float] = field(default_factory=dict)  # ln rank, see difficulty.py
+    spread: dict[int, float] = field(default_factory=dict)  # its uncertainty
 
     def rank_of(self, lemma_id: int) -> float:
+        """The word's effective rank: its blended difficulty, else the raw catalog rank."""
+        blended = self.difficulty.get(lemma_id)
+        if blended is not None:
+            return math.exp(blended)
         rank = self.rank.get(lemma_id)
         # A word the catalog never saw often enough to rank is treated as rarer than any ranked.
         return float(rank) if rank else self.max_rank * 1.5
+
+    def sd_of(self, lemma_id: int) -> float:
+        """How unsure the difficulty is; 0 where only a raw rank is known."""
+        if lemma_id in self.spread:
+            return self.spread[lemma_id]
+        return 0.0 if self.rank.get(lemma_id) else UNKNOWN_SD
 
     @classmethod
     def load(
@@ -194,10 +234,14 @@ class Lexicon:
         """``fixes`` are ``(lemma, pos, domain, action)`` from profile.db."""
         lex = cls(lang=lang)
         for row in catalog.execute(
-            "SELECT id, lemma, pos, corpus_rank, is_function FROM lemma WHERE language = ?",
+            "SELECT id, lemma, pos, corpus_rank, is_function, difficulty, difficulty_sd"
+            " FROM lemma WHERE language = ?",
             (lang,),
         ):
             lex.rank[row["id"]] = row["corpus_rank"]
+            if row["difficulty"] is not None:
+                lex.difficulty[row["id"]] = row["difficulty"]
+                lex.spread[row["id"]] = row["difficulty_sd"] or 0.0
             lex.keys[row["id"]] = (row["lemma"], row["pos"])
             lex.ids[(row["lemma"], row["pos"])] = row["id"]
             if row["is_function"]:
@@ -221,6 +265,11 @@ class Lexicon:
                 lex.weights[lemma_id] = current
             else:
                 lex.weights.pop(lemma_id, None)
+        # A word in several domains is not helped by each in full: the weights sum to at most 1.
+        for lemma_id, found in lex.weights.items():
+            total = sum(w for _d, w in found)
+            if total > 1:
+                lex.weights[lemma_id] = [(d, w / total) for d, w in found]
         return lex
 
 
@@ -239,7 +288,12 @@ class Learner:
         marked = self.status.get(lex.keys.get(lemma_id, ("", "")))
         if marked is not None:
             return 1.0 if marked else 0.0
-        return p_know(self.params, lex.rank_of(lemma_id), lex.weights.get(lemma_id, []))
+        return p_know(
+            self.params,
+            lex.rank_of(lemma_id),
+            lex.weights.get(lemma_id, []),
+            lex.sd_of(lemma_id),
+        )
 
 
 # --- profile.db ------------------------------------------------------------------------
@@ -260,22 +314,21 @@ def load_status(profile: sqlite3.Connection, lang: str = "ja") -> dict[tuple[str
 def observations(
     profile: sqlite3.Connection, lexicon: Lexicon
 ) -> tuple[list[Observation], float, int]:
-    """Turn stored answers into observations. Returns them, the guess rate and the count."""
+    """Turn stored answers into observations. Returns them, the guess rate and the count.
+
+    A word you marked counts once, as it stands in ``word_status`` now: marking it again
+    replaces the mark and clearing it takes its evidence away. The ``mark`` rows in
+    ``answer`` are only a history.
+    """
     domain_index = {k: 1 + i for i, k in enumerate(DOMAIN_KEYS)}
     out: list[Observation] = []
     fakes = fake_yes = used = 0
-    for row in profile.execute(
-        "SELECT kind, lemma, pos, known, weight FROM answer WHERE language = ? ORDER BY id",
-        (lexicon.lang,),
-    ):
-        used += 1
-        if row["kind"] == "fake":
-            fakes += 1
-            fake_yes += row["known"]
-            continue
-        lemma_id = lexicon.ids.get((row["lemma"], row["pos"]))
+    checked: set[tuple[str, str]] = set()  # words a meaning check already speaks for
+
+    def observe(lemma, pos, known, weight, guess) -> None:
+        lemma_id = lexicon.ids.get((lemma, pos))
         if lemma_id is None or lemma_id in lexicon.function:
-            continue
+            return
         features = [(0, 1.0)] + [
             (domain_index[d], w) for d, w in lexicon.weights.get(lemma_id, []) if d in domain_index
         ]
@@ -283,17 +336,38 @@ def observations(
             Observation(
                 tuple(features),
                 math.log(max(lexicon.rank_of(lemma_id), 1.0)),
-                bool(row["known"]),
-                row["weight"],
-                MEANING_GUESS
-                if row["kind"] == "meaning"
-                else (-1.0 if row["kind"] == "word" else 0.0),
+                bool(known),
+                weight,
+                guess,
+                lexicon.sd_of(lemma_id),
             )
         )
+
+    for row in profile.execute(
+        "SELECT kind, lemma, pos, known, weight FROM answer WHERE language = ? ORDER BY id",
+        (lexicon.lang,),
+    ):
+        if row["kind"] == "mark":
+            continue
+        used += 1
+        if row["kind"] == "fake":
+            fakes += 1
+            fake_yes += row["known"]
+            continue
+        if row["kind"] == "meaning":
+            checked.add((row["lemma"], row["pos"]))
+        guess = (
+            MEANING_GUESS if row["kind"] == "meaning" else (-1.0 if row["kind"] == "word" else 0.0)
+        )
+        observe(row["lemma"], row["pos"], row["known"], row["weight"], guess)
+    for (lemma, pos), known in load_status(profile, lexicon.lang).items():
+        if (lemma, pos) not in checked:
+            used += 1
+            observe(lemma, pos, known, WEIGHTS["mark"], 0.0)
     g = guess_rate(fake_yes, fakes)
     # Word-check answers carry the guess rate, which is only known once all fakes are counted.
     fixed = [
-        Observation(o.features, o.offset, o.known, o.weight, g if o.guess < 0 else o.guess)
+        Observation(o.features, o.offset, o.known, o.weight, g if o.guess < 0 else o.guess, o.sd)
         for o in out
     ]
     return fixed, g, used
@@ -327,8 +401,21 @@ def load_params(profile: sqlite3.Connection, lang: str = "ja") -> Params:
     return Params.from_json(row["params"], row["guess_rate"], row["answers"])
 
 
+def current_params(profile: sqlite3.Connection, lexicon: Lexicon) -> Params:
+    """The saved fit, refitted first if it came from an older version of the model.
+
+    Every answer is stored, so nobody has to retake the test after the model changes.
+    """
+    row = profile.execute(
+        "SELECT version, answers FROM model WHERE language = ?", (lexicon.lang,)
+    ).fetchone()
+    if row is not None and row["version"] < MODEL_VERSION:
+        return refit(profile, lexicon)
+    return load_params(profile, lexicon.lang)
+
+
 def load_learner(
     profile: sqlite3.Connection, catalog: sqlite3.Connection, lang: str = "ja"
 ) -> Learner:
     lexicon = Lexicon.load(catalog, load_fixes(profile, lang), lang)
-    return Learner(load_params(profile, lang), lexicon, load_status(profile, lang))
+    return Learner(current_params(profile, lexicon), lexicon, load_status(profile, lang))
