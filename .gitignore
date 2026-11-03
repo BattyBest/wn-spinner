@@ -1,0 +1,25 @@
+# Local data: databases, cached pages, backups. Never commit.
+/data/
+/fixtures/local/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+
+# Frontend
+node_modules/
+frontend/.svelte-kit/
+frontend/build/
+src/wn/api/static/
+
+# Editors, OS, secrets
+.DS_Store
+.idea/
+.vscode/
+.env
+.env.*
