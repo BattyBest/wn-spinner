@@ -20,8 +20,8 @@ from ..analysis.japanese import analyse_text
 from ..analysis.store import compute_stats, rebuild_all, sampled_chapters, save_sample
 from ..collector import Cache, Collector
 from ..collector.http import CollectorError, FetchFailed
-from ..learner.excerpts import PER_NOVEL, save_excerpts
 from ..config import DEFAULT_DELAY, MAX_CONNECTIONS
+from ..learner.excerpts import PER_NOVEL, save_excerpts
 from .api import (
     NOVEL_BATCH,
     RANK_LISTS,
