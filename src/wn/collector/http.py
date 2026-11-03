@@ -32,7 +32,7 @@ RETRY_AFTER_CAP = 120.0
 DAY_SECONDS = 24 * 60 * 60
 
 # Outcomes that are real requests to the host (they count toward the daily cap).
-_REQUEST_OUTCOMES = ("ok", "client_error", "retry", "server_error", "network_error", "challenge")
+REQUEST_OUTCOMES = ("ok", "client_error", "retry", "server_error", "network_error", "challenge")
 # Outcomes of a whole fetch that mean the host is in trouble (they feed the breaker).
 _FAILURE_OUTCOMES = ("server_error", "network_error")
 _FETCH_OUTCOMES = ("ok", "client_error", "server_error", "network_error", "challenge")
@@ -135,10 +135,10 @@ class Collector:
         self._conn.commit()
 
     def requests_today(self, host: str) -> int:
-        marks = ",".join("?" * len(_REQUEST_OUTCOMES))
+        marks = ",".join("?" * len(REQUEST_OUTCOMES))
         row = self._conn.execute(
             f"SELECT COUNT(*) FROM fetch_log WHERE host = ? AND ts >= ? AND outcome IN ({marks})",
-            (host, self._day_start(), *_REQUEST_OUTCOMES),
+            (host, self._day_start(), *REQUEST_OUTCOMES),
         ).fetchone()
         return row[0]
 

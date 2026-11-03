@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..config import data_dir as default_data_dir
 from ..db import open_catalog, open_profile
-from .routes import health
+from .routes import health, novels
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -24,6 +24,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     app = FastAPI(title="wn-spinner", version=__version__)
     app.state.data_dir = root
     app.include_router(health.router, prefix="/api")
+    app.include_router(novels.router, prefix="/api")
 
     if (STATIC_DIR / "index.html").exists():
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="ui")
