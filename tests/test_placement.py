@@ -184,3 +184,55 @@ def test_wrong_meaning_marks_the_word_unknown(world):
     assert row is not None and row["known"] == 0
     assert placement.PART_A_ITEMS["full"] == 60
     assert load_learner(profile, open_catalog(root)).p(ids["lemmas"][0]) > 0
+
+
+# --- Chinese ------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def zh_world(tmp_path):
+    catalog = open_catalog(tmp_path)
+    ids = build(catalog, lang="zh")
+    glosses = {r["lemma"]: r["gloss"] for r in catalog.execute("SELECT lemma, gloss FROM lemma")}
+    ranks, weights = {}, {}
+    for r in catalog.execute("SELECT lemma, corpus_rank FROM lemma WHERE language = 'zh'"):
+        ranks[r["lemma"]] = r["corpus_rank"]
+    for r in catalog.execute(
+        "SELECT l.lemma, d.domain, d.weight FROM lemma_domain d JOIN lemma l ON l.id = d.lemma_id"
+    ):
+        weights.setdefault(r["lemma"], []).append((r["domain"], r["weight"]))
+    catalog.close()
+    return TestClient(create_app(tmp_path)), ids, glosses, ranks, weights, tmp_path
+
+
+def test_chinese_status_and_test_use_chinese_words_only(zh_world):
+    client, ids, glosses, ranks, weights, _ = zh_world
+    assert client.get("/api/test/status?lang=zh").json()["ready"]
+    assert not client.get("/api/test/status?lang=ja").json()["ready"]
+    _, shown = run_test(client, "quick", glosses, ranks, weights, lang="zh")
+    words = [i for i in shown if i["type"] == "word"]
+    assert words and all(w["lemma"] in ranks for w in words)
+    profile = client.get("/api/profile?lang=zh").json()
+    assert profile["language"] == "zh" and profile["tested"]
+    assert profile["level"]["name"] == "HSK"
+    assert all("name_local" in d for d in profile["domains"])
+    assert client.get("/api/profile?lang=ja").json()["answers"] == 0
+
+
+def test_chinese_novels_list_hides_mature_books_on_request(zh_world):
+    client, ids, *_ = zh_world
+    root = zh_world[-1]
+    catalog = open_catalog(root)
+    catalog.execute("UPDATE novel SET is_mature = 1 WHERE id = ?", (ids["novels"][0],))
+    catalog.commit()
+    catalog.close()
+    everything = client.get("/api/novels?lang=zh&limit=100").json()
+    assert everything["total"] == 12
+    shown = client.get("/api/novels?lang=zh&limit=100&hide_r15=true").json()
+    assert shown["total"] == 11
+    assert ids["novels"][0] not in {i["id"] for i in shown["items"]}
+    flagged = next(i for i in everything["items"] if i["id"] == ids["novels"][0])
+    assert flagged["is_mature"]
+    assert client.get("/api/novels?lang=ja&limit=100").json()["total"] == 0
+    detail = client.get(f"/api/novels/{ids['novels'][0]}").json()
+    assert detail["language"] == "zh" and detail["source"] == "jjwxc"

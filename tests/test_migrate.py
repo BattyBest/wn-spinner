@@ -74,3 +74,26 @@ def test_only_the_newest_backups_are_kept(tmp_path):
         (folder / f"{name}.sql").write_text(sql)
         migrate(conn, folder, backup_dir=tmp_path / "backups", backup_keep=2)
     assert len(list((tmp_path / "backups").glob("*.db"))) == 2
+
+
+def test_migration_4_carries_japanese_data_over(tmp_path):
+    from pathlib import Path
+
+    import wn.db
+
+    folder = Path(wn.db.__file__).parent / "catalog"
+    conn = sqlite3.connect(tmp_path / "c.db")
+    first = tmp_path / "upto3"
+    first.mkdir()
+    for f in sorted(folder.glob("00[1-3]_*.sql")):
+        (first / f.name).write_text(f.read_text())
+    assert migrate(conn, first) == 3
+    conn.execute("INSERT INTO jlpt_word (lemma, reading, level) VALUES ('魔法', 'まほう', 4)")
+    conn.execute("INSERT INTO dict_form (form, entry_id) VALUES ('魔法', 1)")
+    conn.commit()
+    assert migrate(conn, folder, backup_dir=tmp_path / "backups") == 4
+    assert conn.execute("SELECT language, lemma, level FROM level_word").fetchall() == [
+        ("ja", "魔法", 4)
+    ]
+    assert conn.execute("SELECT language, form FROM dict_form").fetchall() == [("ja", "魔法")]
+    assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'jlpt_word'").fetchone()
