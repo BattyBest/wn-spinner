@@ -36,6 +36,7 @@ from .model import (
 PART_A_ITEMS = {"full": 60, "quick": 20}
 PASSAGES = {"full": 5, "quick": 0}
 FAKE_SHARE = 0.2
+GENERAL_SHARE = 0.35  # at least this share of words come from outside every domain
 MEANING_EVERY = 10  # claimed known words
 CONTENT_POS = ("名詞", "動詞", "形容詞", "形状詞", "副詞")
 MIN_NOVELS = 3  # a test word must appear in this many novels
@@ -207,6 +208,14 @@ def choose_word(state: dict, learner: Learner, pool: Pool, rng: random.Random) -
             "no words are available to test; run the collection and `wn dict fetch`"
         )
     key = order[0]
+    # Domain offsets can only be told apart from general ability by words outside every
+    # domain, so keep a steady share of those whatever the uncertainties say.
+    words_asked = sum(1 for a in state["asked"] if a["type"] == "word")
+    general_asked = sum(
+        1 for a in state["asked"] if a["type"] == "word" and a.get("domain") is None
+    )
+    if in_domain.get(None) and general_asked < GENERAL_SHARE * (words_asked + 1):
+        key = None
     chosen = sorted(
         in_domain[key],
         key=lambda c: abs(p_know(params, c.rank, lex.weights.get(c.lemma_id, [])) - 0.5),
@@ -458,7 +467,12 @@ def answer(
             state["used_excerpts"].append(item["excerpt_id"])
             state["used_novels"].append(item["novel_id"])
         state["asked"].append(
-            {"type": kind, "lemma_id": item.get("lemma_id"), "text": item.get("text")}
+            {
+                "type": kind,
+                "lemma_id": item.get("lemma_id"),
+                "text": item.get("text"),
+                "domain": item.get("domain"),
+            }
         )
         state["pending"] = None
     _save(profile, session_id, state)

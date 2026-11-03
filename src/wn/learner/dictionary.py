@@ -245,7 +245,7 @@ def load_jlpt(
             level = _level_of(path.stem)
         for word, reading, found in parse_jlpt(path.read_text(encoding="utf-8-sig"), level):
             key = (word, reading)
-            rows[key] = min(found, rows.get(key, found))  # a word in two lists keeps the easier
+            rows[key] = max(found, rows.get(key, found))  # a word in two lists keeps the easier
     if not rows:
         raise DictError("no JLPT words found; give a CSV with a word column and a level")
     with conn:

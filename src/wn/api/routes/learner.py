@@ -208,11 +208,6 @@ def list_words(
             like = f"%{q.replace('%', '').replace('_', '')}%"
             where.append("(l.lemma LIKE ? OR l.reading LIKE ?)")
             args += [like, like]
-        if domain:
-            where.append(
-                "l.id IN (SELECT lemma_id FROM lemma_domain WHERE domain = ? AND weight >= 0.3)"
-            )
-            args.append(domain)
         rows = ctx.catalog.execute(
             "SELECT l.id, l.lemma, l.pos, l.reading, l.gloss, l.corpus_rank FROM lemma l WHERE "
             + " AND ".join(where)
@@ -220,8 +215,11 @@ def list_words(
             args,
         ).fetchall()
         status_map = ctx.learner.status
+        weights = ctx.learner.lexicon.weights  # includes the learner's own domain fixes
         items = []
         for r in rows:
+            if domain and not any(d == domain and w >= 0.3 for d, w in weights.get(r["id"], [])):
+                continue
             mark = status_map.get((r["lemma"], r["pos"]))
             if status == "known" and mark is not True:
                 continue
