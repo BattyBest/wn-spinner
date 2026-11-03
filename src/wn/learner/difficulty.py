@@ -159,7 +159,16 @@ def _half_ranks(conn, lang: str, novel_ids: set[int]) -> dict[int, float]:
 
 def measure_noise(conn, lang: str, counts: dict[int, int]) -> Noise:
     """How noisy the catalog's ranks are, from ranking twice over alternate novels."""
-    novels = sorted({r[0] for r in conn.execute("SELECT DISTINCT novel_id FROM novel_stats")})
+    novels = sorted(
+        {
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT ns.novel_id FROM novel_stats ns JOIN novel n ON n.id = ns.novel_id"
+                " JOIN source s ON s.id = n.source_id WHERE s.language = ?",
+                (lang,),
+            )
+        }
+    )
     if len(novels) < 4:
         return DEFAULT_NOISE
     first = _half_ranks(conn, lang, set(novels[0::2]))

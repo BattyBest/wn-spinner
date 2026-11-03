@@ -111,6 +111,16 @@ def p_know(params: Params, rank: float, weights: list[tuple[str, float]], sd: fl
     return sigmoid(effective_slope(params.slope, sd) * x)
 
 
+def prediction_sd(params: Params, weights: list[tuple[str, float]], word_sd: float) -> float:
+    """How unsure a prediction is about its latent value, in ln rank units.
+
+    The word's own difficulty is uncertain, and so are the ability and the domain offsets that
+    were fitted, so a short test gives flatter predictions than a long one.
+    """
+    domains = sum((m * params.delta_sds.get(d, 0.0)) ** 2 for d, m in weights)
+    return math.sqrt(word_sd**2 + params.theta_sd**2 + domains)
+
+
 def solve(matrix: list[list[float]], rhs: list[float]) -> list[float]:
     """Solve ``matrix x = rhs`` by Gaussian elimination with partial pivoting."""
     n = len(rhs)
@@ -288,12 +298,9 @@ class Learner:
         marked = self.status.get(lex.keys.get(lemma_id, ("", "")))
         if marked is not None:
             return 1.0 if marked else 0.0
-        return p_know(
-            self.params,
-            lex.rank_of(lemma_id),
-            lex.weights.get(lemma_id, []),
-            lex.sd_of(lemma_id),
-        )
+        weights = lex.weights.get(lemma_id, [])
+        sd = prediction_sd(self.params, weights, lex.sd_of(lemma_id))
+        return p_know(self.params, lex.rank_of(lemma_id), weights, sd)
 
 
 # --- profile.db ------------------------------------------------------------------------
@@ -419,3 +426,21 @@ def load_learner(
 ) -> Learner:
     lexicon = Lexicon.load(catalog, load_fixes(profile, lang), lang)
     return Learner(current_params(profile, lexicon), lexicon, load_status(profile, lang))
+
+
+def refit_languages(
+    profile: sqlite3.Connection, catalog: sqlite3.Connection, languages: list[str]
+) -> dict[str, int]:
+    """Refit the saved model of each language that has one; returns the answers used.
+
+    Rebuilding ranks, difficulties or domains changes what every word means to the model, so
+    a fit made before is no longer the best one for the new numbers.
+    """
+    done = {}
+    for code in languages:
+        saved = profile.execute("SELECT 1 FROM model WHERE language = ?", (code,)).fetchone()
+        if saved is None:
+            continue
+        lexicon = Lexicon.load(catalog, load_fixes(profile, code), code)
+        done[code] = refit(profile, lexicon).answers
+    return done

@@ -147,3 +147,36 @@ def test_a_fit_from_an_older_model_version_is_refitted_when_loaded(tmp_path):
     assert params.theta != 5.0 and params.answers == 50
     row = profile.execute("SELECT version FROM model WHERE language = 'ja'").fetchone()
     assert row[0] == 2
+
+
+def test_refit_languages_only_touches_languages_with_a_saved_fit(tmp_path):
+    from wn.learner.model import refit_languages
+
+    catalog, ids = _catalog(tmp_path)
+    profile = open_profile(tmp_path)
+    assert refit_languages(profile, catalog, ["ja", "zh"]) == {}
+    lexicon = Lexicon.load(catalog)
+    with profile:
+        for lid in ids["lemmas"][:200:4]:
+            lemma, pos = lexicon.keys[lid]
+            profile.execute(
+                "INSERT INTO answer (language, kind, lemma, pos, known, weight, at)"
+                " VALUES ('ja', 'word', ?, ?, 1, 1.0, 1.0)",
+                (lemma, pos),
+            )
+        profile.execute(
+            "INSERT INTO model (language, version, params, guess_rate, answers, fitted_at)"
+            " VALUES ('ja', 2, '{\"theta\": [5.0, 1.0], \"domains\": {}}', 0.1, 0, 1.0)"
+        )
+    assert refit_languages(profile, catalog, ["ja", "zh"]) == {"ja": 50}
+    assert profile.execute("SELECT fitted_at FROM model").fetchone()[0] > 1.0
+
+
+def test_a_short_test_gives_flatter_predictions_than_a_long_one():
+    from wn.learner.model import Params, p_know, prediction_sd
+
+    def chance(theta_sd: float) -> float:
+        params = Params(theta=math.log(1500), theta_sd=theta_sd)
+        return p_know(params, 100, [], prediction_sd(params, [], 0.4))
+
+    assert 0.5 < chance(1.2) < chance(0.5) < chance(0.1) < 1

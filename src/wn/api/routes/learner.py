@@ -18,7 +18,7 @@ from ...learner.coverage import (
     weakest_domain,
 )
 from ...learner.domains import DOMAIN_KEYS
-from ...learner.model import MODEL_VERSION, refit
+from ...learner.model import MODEL_VERSION, refit, refit_languages
 from ..personal import Context, open_context
 
 router = APIRouter()
@@ -184,11 +184,12 @@ def get_profile(request: Request, lang: Lang = LangParam) -> dict:
             "language": lang,
             "tested": ctx.tested,
             "answers": params.answers,
-            "vocabulary": vocabulary_size(params),
+            "vocabulary": vocabulary_size(ctx.learner),
             "vocabulary_range": [
-                round(math.exp(params.theta - params.theta_sd)),
-                round(math.exp(params.theta + params.theta_sd)),
+                vocabulary_size(ctx.learner, -params.theta_sd),
+                vocabulary_size(ctx.learner, params.theta_sd),
             ],
+            "vocabulary_rank": round(math.exp(params.theta)),
             "guess_rate": params.guess_rate,
             "level": level_estimate(ctx.catalog, ctx.learner),
             "domains": strengths,
@@ -354,6 +355,8 @@ def set_word_domain(body: DomainBody, request: Request) -> None:
                     " VALUES (?, ?, ?, ?, ?)",
                     (word["language"], word["lemma"], word["pos"], body.domain, body.action),
                 )
+        # A domain fix changes a word's inputs to the model, so the fit follows it.
+        refit_languages(ctx.profile, ctx.catalog, [word["language"]])
     finally:
         ctx.close()
 

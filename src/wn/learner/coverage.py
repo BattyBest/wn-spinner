@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import math
 import sqlite3
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .. import lang as languages
 from ..analysis.store import is_name
@@ -254,5 +253,22 @@ def level_estimate(catalog: sqlite3.Connection, learner: Learner) -> dict:
     }
 
 
-def vocabulary_size(params: Params) -> int:
-    return round(math.exp(params.theta))
+def vocabulary_size(learner: Learner, shift: float = 0.0) -> int:
+    """How many of the catalog's content words you are expected to know.
+
+    It adds up the chance of knowing each ranked word, and counts a word you marked as 1 or 0.
+    ``shift`` moves the ability by that many ln-rank units, for a range around the estimate.
+    """
+    lex = learner.lexicon
+    moved = Learner(
+        replace(learner.params, theta=learner.params.theta + shift), lex, learner.status
+    )
+    return round(
+        sum(
+            moved.p(i)
+            for i in lex.keys
+            if i not in lex.function
+            and i not in lex.names
+            and (lex.rank.get(i) or i in lex.difficulty)
+        )
+    )

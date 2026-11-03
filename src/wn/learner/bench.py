@@ -236,10 +236,13 @@ def run(
 ):
     rng = random.Random(seed)
     world = make_world(rng, words)
+    # The learners are drawn first and each test has its own random stream, so every model
+    # meets the same people answering the same way.
+    people = [make_learner(rng, words) for _ in range(learners)]
     scheme = make(world)
     score = Score()
-    for _ in range(learners):
-        run_learner(scheme, world, make_learner(rng, words), rng, score)
+    for k, person in enumerate(people):
+        run_learner(scheme, world, person, random.Random(seed * 100_003 + k), score)
     return scheme.name, score
 
 
@@ -271,6 +274,7 @@ def improved_scheme(
     blend: bool = True,
     use_sd: bool = True,
     fit_noise: bool = True,
+    ability_sd: bool = True,
 ) -> Scheme:
     """Blended difficulty with its uncertainty, and a fitted slope."""
     noise = difficulty.fit_noise(world.splits) if fit_noise else difficulty.DEFAULT_NOISE
@@ -314,7 +318,10 @@ def improved_scheme(
         return model.fit(rows, guess, len(rows))
 
     def predict(params: model.Params, i: int) -> float:
-        return model.p_know(params, math.exp(blended[i].ln_rank), [], blended[i].sd)
+        sd = blended[i].sd
+        if ability_sd:  # we are also unsure of the learner's own ability
+            sd = model.prediction_sd(params, [], sd)
+        return model.p_know(params, math.exp(blended[i].ln_rank), [], sd)
 
     def choose(w: World, params: model.Params, asked: set[int], rng: random.Random) -> int:
         target = 0.5

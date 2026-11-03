@@ -108,3 +108,12 @@ def test_the_model_command_is_registered():
 
     result = CliRunner().invoke(app, ["model", "--help"])
     assert result.exit_code == 0 and "bench" in result.output and "check" in result.output
+
+
+def test_every_model_meets_the_same_simulated_learners():
+    first = bench.run(6, seed=5, make=bench.baseline_scheme, words=2000)[1]
+    again = bench.run(6, seed=5, make=bench.baseline_scheme, words=2000)[1]
+    other = bench.run(6, seed=5, make=bench.improved_scheme, words=2000)[1]
+    assert first.total_loss() == again.total_loss()
+    # Same learners and same words held out: the number of scored words matches.
+    assert sum(len(v) for v in first.loss.values()) == sum(len(v) for v in other.loss.values())

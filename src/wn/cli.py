@@ -152,7 +152,9 @@ def analyse(
     """Recompute word-frequency ranks and every novel's statistics from stored counts."""
     from . import lang as languages
     from .analysis.store import rebuild_all
+    from .db import open_profile
     from .learner.domains import rebuild_domains
+    from .learner.model import refit_languages
 
     if lang is not None and lang not in languages.CODES:
         raise _fail(f"--lang must be one of: {', '.join(languages.CODES)}")
@@ -171,6 +173,11 @@ def analyse(
                 for key, members in report.groups.items():
                     note = "  (too few novels, skipped)" if key in report.skipped else ""
                     typer.echo(f"  {key:<9} {members:>4} novels{note}")
+        # The ranks and domains just changed, so the saved fits no longer match them.
+        for code, answers in refit_languages(
+            open_profile(data_dir()), conn, [lang] if lang else list(languages.CODES)
+        ).items():
+            typer.echo(f"{languages.get(code).name}: refitted your model from {answers} answers")
     finally:
         conn.close()
 
