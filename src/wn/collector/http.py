@@ -44,6 +44,11 @@ _CHALLENGE = re.compile(
 )
 
 
+# Called once per real request (each redirect hop and retry too, never for cache hits):
+# url, HTTP status (None if no response came), wall-clock send time, seconds taken, error.
+RequestHook = Callable[[str, int | None, float, float, str | None], None]
+
+
 class CollectorError(Exception):
     pass
 
@@ -112,6 +117,7 @@ class Collector:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         wall: Callable[[], float] = time.time,
         jitter: Callable[[], float] = random.random,
+        on_request: RequestHook | None = None,
     ):
         self._conn = conn
         self._cache = cache
@@ -120,6 +126,7 @@ class Collector:
         self._sleep = sleep
         self._wall = wall
         self._jitter = jitter
+        self._on_request = on_request
         self._robots: dict[str, RobotsRules] = {}
         self._robots_locks: dict[str, asyncio.Lock] = {}
         self._pending: dict[str, int] = {}  # requests sent but not yet logged, per host
@@ -324,6 +331,12 @@ class Collector:
             if count:
                 self._pending[host] = self._pending.get(host, 0) + 1
 
+    def _report(
+        self, url: str, status: int | None, sent_at: float, began: float, error: str | None
+    ) -> None:
+        if self._on_request is not None:
+            self._on_request(url, status, sent_at, time.monotonic() - began, error)
+
     async def _get(self, url: str, host: str, delay: float, policy) -> tuple[httpx.Response, str]:
         """GET with the honest User-Agent, following redirects that stay on the same host.
 
@@ -333,9 +346,15 @@ class Collector:
         for hop in range(MAX_REDIRECTS + 1):
             if hop:
                 await self._pace(host, delay, policy, count=False)
-            response = await self._client.get(
-                url, headers={"User-Agent": USER_AGENT}, follow_redirects=False
-            )
+            sent_at, began = self._wall(), time.monotonic()
+            try:
+                response = await self._client.get(
+                    url, headers={"User-Agent": USER_AGENT}, follow_redirects=False
+                )
+            except httpx.HTTPError as exc:
+                self._report(url, None, sent_at, began, f"{type(exc).__name__}")
+                raise
+            self._report(url, response.status_code, sent_at, began, None)
             location = response.headers.get("Location")
             if response.status_code in (301, 302, 303, 307, 308) and location:
                 target = urljoin(url, location)

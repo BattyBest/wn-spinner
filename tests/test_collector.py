@@ -248,3 +248,22 @@ async def test_plan_reports_without_sending(collector, mock):
 async def test_non_http_urls_are_rejected(collector):
     with pytest.raises(ValueError):
         await collector.fetch("file:///etc/passwd")
+
+
+async def test_every_request_is_reported_but_cache_hits_are_not(collector, mock):
+    seen: list[tuple[str, int | None, str | None]] = []
+    collector._on_request = lambda url, status, sent_at, seconds, error: seen.append(
+        (url, status, error)
+    )
+    mock.get(ROBOTS).respond(404)
+    mock.get(page(1)).mock(
+        side_effect=[httpx.Response(503), httpx.ConnectError("boom"), httpx.Response(200, text="a")]
+    )
+    await collector.fetch(page(1))
+    await collector.fetch(page(1))  # from the cache: nothing is sent, nothing is reported
+    assert seen == [
+        (ROBOTS, 404, None),
+        (page(1), 503, None),
+        (page(1), None, "ConnectError"),
+        (page(1), 200, None),
+    ]
