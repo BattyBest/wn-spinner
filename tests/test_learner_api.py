@@ -120,6 +120,10 @@ def test_detail_has_unknown_words_with_glosses(tested):
 def test_marking_a_word_changes_predictions_and_can_be_cleared(tested):
     client, ids, _ = tested
     word = ids["lemmas"][300]
+    # The placement test can already have marked words unknown (a wrong meaning answer).
+    marked_before = {
+        i["lemma_id"] for i in client.get("/api/words?status=marked&limit=100").json()["items"]
+    }
     before = client.get("/api/words?q=&limit=100").json()
     entry = next(i for i in before["items"] if i["lemma_id"] == word) if False else None
     assert entry is None  # rank 301 is beyond the first 100 results
@@ -137,7 +141,10 @@ def test_marking_a_word_changes_predictions_and_can_be_cleared(tested):
     assert client.get("/api/words?status=unknown").json()["items"][0]["p"] == 0.0
 
     client.put("/api/words/status", json={"lemma_id": word, "known": None})
-    assert client.get("/api/words?status=marked").json()["total"] == 0
+    marked_after = {
+        i["lemma_id"] for i in client.get("/api/words?status=marked&limit=100").json()["items"]
+    }
+    assert marked_after == marked_before - {word}
     assert (
         client.put("/api/words/status", json={"lemma_id": 99999, "known": True}).status_code == 404
     )
