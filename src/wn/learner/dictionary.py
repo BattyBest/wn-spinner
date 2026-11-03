@@ -293,7 +293,19 @@ _TONE_MARKS = {
     "ü": "ǖǘǚǜü",
 }
 # Entries that only point at another entry make poor glosses for a word.
-_WEAK_GLOSS = ("surname ", "variant of", "old variant of", "erhua variant", "see ", "abbr. for")
+_POINTER_GLOSS = (
+    "surname ",
+    "variant of",
+    "old variant of",
+    "unofficial variant of",
+    "japanese variant of",
+    "erhua variant",
+    "used in ",
+    "see ",
+    "abbr. for",
+)
+# Entries whose first sense is bound, literary, regional or dated: keep, but prefer another.
+_MARKED_GLOSS = ("(bound form)", "(literary)", "(archaic)", "(old)", "(dialect)", "(tw)")
 
 
 def _mark_syllable(match: re.Match) -> str:
@@ -343,9 +355,12 @@ def cedict_gloss(meanings: list[str]) -> str:
     return text if len(text) <= GLOSS_MAX else text[: GLOSS_MAX - 1].rstrip(", ;") + "…"
 
 
-def _weak(meanings: list[str]) -> bool:
+def _weakness(meanings: list[str]) -> int:
+    """0 for an ordinary entry, 1 for a marked first sense, 2 for a pointer to another entry."""
     first = meanings[0].lower() if meanings else ""
-    return first.startswith(_WEAK_GLOSS)
+    if not first or first.startswith(_POINTER_GLOSS):
+        return 2
+    return 1 if first.startswith(_MARKED_GLOSS) else 0
 
 
 def _read_text(path: Path) -> str:
@@ -393,7 +408,7 @@ def load_cedict(conn: sqlite3.Connection, path: Path, now: float | None = None) 
         )
         word = entry["simplified"]
         if word in wanted:
-            key = (1 if _weak(entry["meanings"]) else 0, entries)
+            key = (_weakness(entry["meanings"]), entries)
             if word not in best or key < best[word][0]:
                 best[word] = (key, {**entry, "id": entries})
     with conn:
