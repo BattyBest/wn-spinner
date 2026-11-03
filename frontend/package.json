@@ -1,0 +1,31 @@
+{
+	"name": "wn-spinner-ui",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"lint": "prettier --check .",
+		"format": "prettier --write ."
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-static": "^4.0.1",
+		"@sveltejs/kit": "^3.1.1",
+		"@sveltejs/vite-plugin-svelte": "^7.3.1",
+		"@tailwindcss/vite": "^4.3.4",
+		"prettier": "^3.9.10",
+		"prettier-plugin-svelte": "^4.1.1",
+		"prettier-plugin-tailwindcss": "^0.8.1",
+		"svelte": "^5.57.3",
+		"svelte-check": "^4.7.8",
+		"tailwindcss": "^4.3.4",
+		"typescript": "^6.0.3",
+		"vite": "^8.3.5"
+	},
+	"imports": {
+		"#lib/*.svelte": "./src/lib/*.svelte",
+		"#lib/*": "./src/lib/*.ts"
+	}
+}
